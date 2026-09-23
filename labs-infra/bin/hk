@@ -70,15 +70,15 @@ THE MACHINES — built once
 
 LABS — deployed into the VM, one at a time
   hk list              every lab and whether it is deployed
-  hk deploy <lab>      add a lab to the VM, and print its questions
-                       and answers  (--no-solution prints questions only)
+  hk deploy <lab>      stage a lab without running it, and print its
+                       questions and answers  (--no-solution: questions only)
   hk status <lab>      what that lab has created so far
   hk reset <lab>       clear what it created, keep it deployed
   hk remove <lab>      take it out of the VM entirely
 
   hk question <lab>    what that lab asks you to work out
   hk solution <lab>    the answers, once you have tried
-  hk run <lab>         run the lab's own steps, so its resources exist
+  hk run <lab>         stage the lab AND run it, so its resources exist
                        (--cleanup also runs its final teardown step)
 
   hk snapshot          save a restore point of the configured VM
@@ -423,9 +423,33 @@ INFO
   # deciding to deploy it, or after destroying everything.
   question|solution) exec "$ROOT/bin/hk-card" "$cmd" "${1:-}" ;;
 
-  # Runs the lab's own steps inside the VM, so what it creates actually
-  # exists. deploy still only stages; this is the explicit opt-in.
-  run) need_vm; exec "$ROOT/bin/hk-run" "$@" ;;
+  # One command for "give me this lab, working": stage it if it is not
+  # already there, then run its own steps so its resources exist. `hk deploy`
+  # remains the staging-only path for when working through the steps yourself
+  # IS the exercise.
+  run)
+    name=$(lab "${1:-}"); shift || true
+    n=$((10#${name#lab}))
+    cleanup=""; pass=()
+    for arg in "$@"; do
+      case "$arg" in
+        --cleanup) cleanup="--cleanup" ;;
+        *) pass+=("$arg") ;;
+      esac
+    done
+    echo "==> [1/2] staging $name"
+    ansible_run lab.yml labvm -e "hk_lab_ref=$name" -e hk_action=deploy "${pass[@]+"${pass[@]}"}"
+    echo
+    # The questions before the run, never the answers: you are about to watch
+    # the lab produce its evidence, and knowing what to look for is the point.
+    "$ROOT/bin/hk-card" question "$n"
+    echo
+    echo "==> [2/2] running $name"
+    "$ROOT/bin/hk-run" "$n" $cleanup
+    echo
+    echo "Answers:      hk solution $n"
+    echo "Inside the VM: hk ssh, then  lab $n"
+    exit 0 ;;
 
   ca) exec "$ROOT/bin/hk-ca" "$@" ;;
 

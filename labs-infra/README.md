@@ -157,7 +157,7 @@ bin/hk deploy lab04      # add a lab
 bin/hk status lab04      # what it has created so far
 bin/hk reset lab04       # clear what it created, keep it deployed
 bin/hk remove lab04      # take it out entirely
-bin/hk run 04            # run its steps so its resources exist
+bin/hk run lab04         # stage a lab AND run it
 bin/hk question 04       # what that lab asks
 bin/hk solution 04       # the answers
 
@@ -308,23 +308,30 @@ credential is in a file in the repository and printed by `hk rancher`.
 
 ## Running a lab
 
-`hk deploy` stages a lab: it creates the namespace, assigns it to a Rancher
-Project and puts the files in place. It does **not** run the lab's commands —
-working through those is the exercise, so a freshly deployed lab has no
-workloads and its Project in Rancher is empty. That is correct, and it
-surprises everyone once.
-
-When you want the resources to exist — to see a lab in Rancher, or to get back
-to a known state quickly — run it:
+One command takes a lab from nothing to working:
 
 ```bash
-bin/hk run 04              # run the lab, keep what it creates
-bin/hk deploy lab04 --run  # deploy and run in one go
-bin/hk run 04 --cleanup    # also run its final teardown step
+bin/hk run lab04          # stage it, show its questions, run its steps
+bin/hk run lab04 --cleanup   # also run its final teardown step
 ```
 
-Four things make this more than a loop over `step*.sh`, and each one would
-break a naive version:
+`lab04`, `04` and `4` all mean the same lab. It stages the lab if it is not
+already there — namespace under the Restricted standard, Rancher Project,
+files in `~/labs/lab04/` — prints the question card so you know what to look
+for, then runs the lab's own steps. Repeating it is safe.
+
+`bin/hk deploy lab04` remains the staging-only path, for when working through
+the steps yourself *is* the exercise. It creates everything and runs nothing,
+so the lab's Project in Rancher is empty until you run it. That is deliberate,
+and it is the one thing about this repository that surprises everyone once.
+
+| | |
+| --- | --- |
+| `hk run lab04` | give me this lab, working |
+| `hk deploy lab04` | I want to do this lab myself |
+
+Four things make running a lab more than a loop over `step*.sh`, and each one
+would break a naive version:
 
 - **Every lab's last step deletes what the lab created.** Running it would
   leave exactly the empty namespace you started with, so teardown is skipped

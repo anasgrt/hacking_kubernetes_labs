@@ -88,6 +88,19 @@ assert_rc "deploy rejects lab 11" 2
 hk_run "hk-labs" deploy
 assert_rc "deploy with no lab is rejected" 2
 
+echo "hk run stages and runs"
+hk_run "hk-labs" run lab04
+assert_log "run stages the lab first" "hk_lab_ref=lab04"
+assert_log "run stages with the deploy action" "hk_action=deploy"
+for variant in lab04 04 4; do
+  hk_run "hk-labs" run "$variant"
+  if logged "$HK_LOG" "hk_lab_ref=lab04"; then ok "run $variant -> lab04"; else bad "run $variant -> lab04"; fi
+done
+hk_run "hk-labs" run 11
+assert_rc "run rejects lab 11" 2
+hk_run "" run lab04
+assert_rc "run needs the lab VM running" 1
+
 echo "hk guards"
 hk_run "" deploy lab01
 assert_rc  "deploy needs the lab VM running" 1
