@@ -16,6 +16,8 @@
     name:
       - apt-transport-https
       - bash-completion
+      # dig, used by the k3s role to probe which DNS upstream actually answers.
+      - bind9-dnsutils
       - ca-certificates
       - curl
       - gnupg

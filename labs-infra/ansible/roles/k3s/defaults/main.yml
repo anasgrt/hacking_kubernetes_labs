@@ -9,3 +9,13 @@ hk_k3s_server_args:
   - --disable=servicelb
   - --write-kubeconfig-mode=0644
   - --node-name=hk-lab-node
+
+# Used to pick the cluster's DNS upstream. The node's own nameservers are tried
+# first, in order; these are the fallback when none of them answers — which is
+# the normal case under VirtualBox NAT on an IPv6-primary host. Override if
+# this network blocks public resolvers.
+hk_dns_fallbacks:
+  - 1.1.1.1
+  - 8.8.8.8
+
+hk_dns_probe_name: github.com

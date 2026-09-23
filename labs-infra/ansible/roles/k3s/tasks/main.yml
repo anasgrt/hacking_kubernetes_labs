@@ -4,6 +4,78 @@
 # enforces NetworkPolicy out of the box through kube-router, which Lab 4
 # genuinely requires.
 
+# --- cluster DNS upstream -------------------------------------------------
+# CoreDNS forwards to the resolv.conf kubelet hands its Pods. By default that
+# is the node's host-inherited file, which on VirtualBox NAT lists 10.0.2.3 —
+# VirtualBox's DNS proxy. On an IPv6-primary host that proxy answers over IPv6
+# only, and the dead IPv4 entry is the one an IPv4-only Pod network is left
+# with: every in-cluster lookup of an external name then fails with SERVFAIL,
+# which shows up as Falco's falcoctl init container crash-looping. So pick an
+# upstream that demonstrably answers and hand k3s that instead.
+
+- name: Create the k3s configuration directory
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: '0755'
+
+- name: Collect the IPv4 nameservers the node inherited
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    cat /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null
+    | awk '/^nameserver/ && $2 ~ /^[0-9]+(\.[0-9]+){3}$/ && $2 !~ /^127\./ {print $2}'
+    | awk '!seen[$0]++'
+  args:
+    executable: /bin/bash
+  register: hk_inherited_ns
+  changed_when: false
+
+- name: Find a nameserver that actually answers an external query
+  ansible.builtin.shell: |
+    set -uo pipefail
+    for ns in {{ (hk_inherited_ns.stdout_lines + hk_dns_fallbacks) | unique | join(' ') }}; do
+      if [ -n "$(dig +short +time=3 +tries=1 A {{ hk_dns_probe_name }} @"$ns" 2>/dev/null)" ]; then
+        echo "$ns"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: hk_working_ns
+  changed_when: false
+
+- name: Refuse to continue without a usable DNS upstream for the cluster
+  ansible.builtin.assert:
+    that: hk_working_ns.stdout_lines | length > 0
+    fail_msg: >-
+      None of {{ (hk_inherited_ns.stdout_lines + hk_dns_fallbacks) | unique | join(', ') }}
+      answered a query for {{ hk_dns_probe_name }} from inside the VM. Cluster
+      DNS cannot work. Set hk_dns_fallbacks to a resolver this network permits.
+
+- name: Give the cluster its own resolv.conf
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/resolv.conf
+    mode: '0644'
+    content: |
+      # Managed by Ansible. Handed to kubelet via /etc/rancher/k3s/config.yaml,
+      # so every Pod — CoreDNS included — forwards to an upstream that was
+      # proved to answer at configure time.
+      {% for ns in hk_working_ns.stdout_lines %}
+      nameserver {{ ns }}
+      {% endfor %}
+  notify: restart k3s
+
+- name: Point k3s at it
+  # A config file rather than a server flag: the flags live in the systemd unit
+  # the installer wrote, and rewriting that unit would mean re-running the
+  # installer on every change.
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/config.yaml
+    mode: '0644'
+    content: |
+      # Managed by Ansible.
+      resolv-conf: /etc/rancher/k3s/resolv.conf
+  notify: restart k3s
+
 - name: Check whether k3s is already installed at the pinned version
   ansible.builtin.command: k3s --version
   register: hk_k3s_installed
@@ -21,6 +93,12 @@
     executable: /bin/bash
   when: hk_k3s_version.split('+')[0] not in (hk_k3s_installed.stdout | default(''))
   notify: restart k3s
+
+- name: Apply a changed k3s configuration now
+  # Handlers otherwise run at the end of the play, long after the CoreDNS and
+  # cluster-DNS checks below have already tested the old configuration. The
+  # flush is placed after the install so the unit exists when it fires.
+  ansible.builtin.meta: flush_handlers
 
 - name: Wait for the kubeconfig to appear
   ansible.builtin.wait_for:
@@ -70,6 +148,44 @@
   until: hk_coredns.rc == 0
   retries: 30
   delay: 10
+  changed_when: false
+
+- name: Restart CoreDNS so it picks up the cluster resolv.conf
+  # kubelet injects resolv.conf when a Pod is created, so a running CoreDNS
+  # keeps the old upstream until its Pod is replaced.
+  ansible.builtin.command: kubectl -n kube-system rollout restart deployment/coredns
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: true
+
+- name: Wait for the restarted CoreDNS
+  ansible.builtin.command: >-
+    kubectl -n kube-system rollout status deployment/coredns --timeout=300s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: hk_coredns_restarted
+  until: hk_coredns_restarted.rc == 0
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: Prove cluster DNS resolves an external name
+  # Queried through the ClusterDNS service IP, which is the path every Pod
+  # takes. Falco's chart pulls its rules over this at install time, so a broken
+  # upstream has to fail here rather than as a crash-looping init container.
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    dig +short +time=5 +tries=2 A {{ hk_dns_probe_name }}
+    @$(kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}')
+    | grep -E '^[0-9]+(\.[0-9]+){3}$'
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: hk_cluster_dns
+  until: hk_cluster_dns.rc == 0
+  retries: 12
+  delay: 5
   changed_when: false
 
 - name: Create the chapter study namespaces
