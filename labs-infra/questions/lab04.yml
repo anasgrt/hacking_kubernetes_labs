@@ -1,0 +1,83 @@
+title: Lab 4 — Verify NetworkPolicy with one allowed and one denied client
+related: Chapter 5
+objective: >-
+  Prove ingress selection and enforcement using a direct Pod IP. DNS, Service
+  translation and egress policy are deliberately excluded.
+question: >-
+  Two clients reach a server. A policy is applied that should admit one and
+  refuse the other. This lab is as much about constructing an experiment whose
+  failure means only one thing as it is about NetworkPolicy itself.
+theory:
+  - >-
+    NetworkPolicy is namespaced and selects Pods by label. A Pod that no
+    policy selects accepts everything; the moment one policy selects it
+    for a direction, that direction becomes default-deny and only the
+    listed peers are allowed. Ingress and egress are independent.
+  - >-
+    The API server only stores the object. Enforcement belongs entirely
+    to the CNI, so a cluster whose CNI does not implement NetworkPolicy
+    will accept every policy you write, show it with kubectl get netpol,
+    and filter nothing.
+  - >-
+    Enforcement usually drops packets rather than refusing them, so a
+    denied client most often hangs until its own timeout instead of
+    failing fast; some implementations return a network error instead.
+    Either way, do not expect an immediate, tidy rejection. Testing a
+    Pod IP directly removes DNS and Service routing from the result,
+    leaving policy as the only variable.
+
+answer_with:
+  - >-
+    Why does the probe target the Pod IP directly instead of a Service name?
+  - >-
+    Both clients return 200 before the policy is applied. Why is that baseline
+    worth a step of its own?
+  - >-
+    After the policy, the denied client fails. Should that failure be immediate
+    or slow, and why does the difference matter when reading the result?
+  - >-
+    This lab is the reason the infrastructure uses k3s with kube-router. What
+    would a CNI that only stores NetworkPolicy do to this lab?
+solution:
+  - >-
+    To remove DNS and Service routing from the experiment. A failure against a
+    Service name could be CoreDNS, the Service's selector, kube-proxy or the
+    policy — four candidate causes for one symptom. Addressing the Pod IP
+    directly leaves ingress selection and enforcement as the only variables.
+    Egress policy is excluded for the same reason.
+  - >-
+    Because without it, the failure after applying the policy has several
+    possible causes: a crashed server, the wrong port, an unready Pod, or
+    unrelated cluster-wide policy. Establishing that both clients reach the
+    server first makes the policy the only thing that changed, so the
+    subsequent difference is attributable to it.
+  - >-
+    Slow — it hangs until the client's 3-second timeout. NetworkPolicy drops
+    packets silently rather than refusing the connection, so there is no
+    immediate "connection refused". If you expect a fast error you will read a
+    correctly working policy as a broken test, or add retries that mask it.
+  - >-
+    It would accept the NetworkPolicy object, report it with kubectl get
+    netpol, and let both clients keep returning 200. The dangerous version of
+    that outcome is not the visible failure but the invisible one: on such a
+    cluster you can write policies all day, see them stored, and believe you
+    are segmented. kind's default CNI behaves exactly this way, which is why
+    the lab VM uses k3s and kube-router.
+
+solution_steps:
+  # Which of the lab's own steps produce the evidence for each
+  # answer above, in order. '-' means the answer is reasoning
+  # rather than something a command shows.
+  - '2'
+  - '2'
+  - '3'
+  - '3 4'
+
+main_lesson: >-
+  A NetworkPolicy that exists is not a NetworkPolicy that is enforced, and
+  the difference is invisible unless you test for it. Prove it with one
+  client that should reach the target and one that should not, against a
+  baseline where both did. After this lab you should be able to
+  demonstrate enforcement rather than configuration, and recognise a
+  silently non-enforcing CNI from a passing test.
+

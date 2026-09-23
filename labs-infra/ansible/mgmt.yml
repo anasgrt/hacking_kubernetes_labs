@@ -1,0 +1,101 @@
+---
+# Configure the management VM: RKE2, then Rancher on top of it.
+#
+# This machine is optional and separate on purpose. Every lab works without it;
+# it exists so the lab cluster can be watched through a real Rancher UI. It is
+# never a lab target — labs.yml explains why it is not the same machine.
+#
+# Run through `bin/hk mgmt configure`. Safe to re-run; every role is idempotent.
+
+- name: Configure the management VM
+  hosts: mgmtvm
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Load the fleet definition
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../labs.yml"
+        name: hk_spec
+
+    - name: Take the management settings from the fleet definition
+      ansible.builtin.set_fact:
+        hk_mgmt_ip: "{{ hk_spec.mgmt.ip }}"
+        hk_rke2_version: "{{ hk_spec.rancher.rke2_version }}"
+        hk_helm_version: "{{ hk_spec.rancher.helm_version }}"
+        hk_rancher_chart_version: "{{ hk_spec.rancher.chart_version }}"
+        hk_rancher_hostname: "{{ hk_spec.rancher.hostname }}"
+        hk_rancher_admin_password: "{{ hk_spec.rancher.admin_password }}"
+
+    - name: Fail fast on an unexpected guest architecture
+      ansible.builtin.assert:
+        that: ansible_facts['architecture'] in ['aarch64', 'x86_64']
+        fail_msg: >-
+          Unsupported guest architecture {{ ansible_facts['architecture'] }}.
+
+    - name: Require enough machine for RKE2 and Rancher together
+      # Rancher alone requests 1 GB and is limited to 4; RKE2 and its system
+      # charts want the rest. Failing here beats an OOM kill twenty minutes in.
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['memtotal_mb'] | int >= 9000
+          - ansible_facts['processor_vcpus'] | int >= 4
+        fail_msg: >-
+          The management VM has {{ ansible_facts['memtotal_mb'] }} MB and
+          {{ ansible_facts['processor_vcpus'] }} vCPUs. Raise mgmt.memory and
+          mgmt.cpus in labs.yml, then 'vagrant reload hk-mgmt'.
+
+    - name: Confirm the host-only address arrived
+      ansible.builtin.assert:
+        that: hk_mgmt_ip in ansible_facts['all_ipv4_addresses']
+        fail_msg: >-
+          {{ hk_mgmt_ip }} is not on this machine. Rancher's certificate and
+          its agents are issued for that address; fix the private_network in
+          the Vagrantfile before continuing.
+
+    - name: Wait for any boot-time apt lock to clear
+      ansible.builtin.shell: |
+        set -e
+        for _ in $(seq 1 60); do
+          fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || exit 0
+          sleep 5
+        done
+        exit 1
+      changed_when: false
+      args:
+        executable: /bin/bash
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          # dig, used to prove the DNS upstream and the cluster's own resolver.
+          - bind9-dnsutils
+          - jq
+          - openssl
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Resolve the Rancher hostname on this machine
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^.*\s{{ hk_rancher_hostname | regex_escape }}(?:\s|$)'
+        line: "{{ hk_mgmt_ip }} {{ hk_rancher_hostname }}"
+
+  roles:
+    - role: dnsupstream
+      tags: [dns]
+    - role: rke2
+      tags: [rke2]
+    - role: rancher
+      tags: [rancher]
+
+  post_tasks:
+    - name: Where to go next
+      ansible.builtin.debug:
+        msg:
+          - "Rancher: https://{{ hk_rancher_hostname }}  (admin / see 'hk rancher')"
+          - "Host set-up, once:  hk rancher --setup"
+          - "Import the lab cluster:  hk import"

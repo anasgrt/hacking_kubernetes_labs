@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Records its arguments instead of touching a VM, so the tests can assert what
+# `hk` would have done. Tracks which machines are "running" in $STUB_STATE, so
+# `up` and `destroy` change what a later `status` reports — otherwise a build
+# could never reach its Ansible half.
+echo "vagrant $*" >> "$STUB_LOG"
+
+is_running() { [[ " ${STUB_RUNNING:-} $(cat "$STUB_STATE" 2>/dev/null) " == *" $1 "* ]]; }
+
+case "$1" in
+  up)
+    echo "$2" >> "$STUB_STATE" ;;
+  destroy)
+    # hk calls: vagrant destroy -f <name>
+    name="${!#}"
+    if [ -f "$STUB_STATE" ]; then grep -vxF "$name" "$STUB_STATE" > "$STUB_STATE.tmp" || true; mv "$STUB_STATE.tmp" "$STUB_STATE"; fi ;;
+  status)
+    name="${2:-}"
+    if is_running "$name"; then
+      echo "$name                   running (virtualbox)"
+    else
+      echo "$name                   not created (virtualbox)"
+    fi ;;
+  ssh-config)
+    name="${2:-}"
+    is_running "$name" || exit 1
+    printf 'Host %s\n  HostName 127.0.0.1\n  User vagrant\n  Port 2222\n  IdentityFile /dev/null\n  StrictHostKeyChecking no\n' "$name" ;;
+  ssh)
+    exit "${STUB_SSH_RC:-0}" ;;
+esac
+exit 0

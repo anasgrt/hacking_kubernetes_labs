@@ -1,0 +1,30 @@
+# Managed by Ansible.
+hostname: {{ hk_rancher_hostname }}
+replicas: 1
+bootstrapPassword: {{ hk_rancher_admin_password | to_json }}
+# The certificate is signed by the lab's own CA, which Rancher must publish to
+# its downstream agents so they can verify it.
+privateCA: true
+agentTLSMode: strict
+ingress:
+  ingressClassName: nginx
+  # A downstream cluster's agent holds ONE long-lived websocket to Rancher and
+  # sends nothing while it is idle. nginx's default proxy read timeout is 60
+  # seconds, so without these it closes that tunnel — and the agent never
+  # notices, because the close reaches the ingress, not the agent. The cluster
+  # then sits in Rancher as "Unavailable — Cluster agent is not connected"
+  # while the agent's own log still says "Connected to proxy".
+  #
+  # RKE2's default ingress is nginx; Traefik does not impose this timeout,
+  # which is why the same import works there without any annotation.
+  extraAnnotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  tls:
+    source: secret
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    memory: 4Gi

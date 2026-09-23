@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""Render a lab's question or solution card.
+
+    hk question 04        what the lab asks
+    hk solution 04        what the answers are
+
+The cards live in questions/labNN.yml and are hand-written: theory.md contains
+no questions, so there is nothing to extract them from. They sit OUTSIDE
+ansible/roles/labkit/files because bin/extract-labs.py deletes that whole tree
+whenever the kits are regenerated.
+
+Reads the files without PyYAML, which is not present on a stock macOS Python
+and which the rest of this repository also does without. The cost is that the
+card files must stay inside the small YAML subset parse_card understands:
+plain `key: value`, folded `key: >-` blocks, and lists of `- >-` items. Any
+other YAML construct is rejected loudly rather than silently mis-parsed.
+"""
+import os
+import re
+import sys
+import textwrap
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+CARDS = os.path.join(ROOT, "questions")
+KITS = os.path.join(ROOT, "ansible", "roles", "labkit", "files")
+WIDTH = 78
+
+SCALARS = {"title", "related", "objective", "question", "main_lesson", "notes"}
+LISTS = {"theory", "answer_with", "solution", "solution_steps"}
+
+
+def parse_card(text, where="<card>"):
+    """The YAML subset the cards are written in. Anything else is an error."""
+    data, key, buf, items, item = {}, None, None, None, None
+    dash_indent = None   # the column the list's '-' markers sit at
+
+    def flush_scalar():
+        if key is not None and buf is not None:
+            data[key] = " ".join(buf).strip()
+
+    def flush_item():
+        if item is not None and items is not None:
+            items.append(" ".join(item).strip())
+
+    for lineno, raw in enumerate(text.split("\n"), 1):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        line = raw.strip()
+
+        if indent == 0:
+            flush_scalar()
+            flush_item()
+            if items is not None and key is not None:
+                data[key] = items
+            key, buf, items, item = None, None, None, None
+            dash_indent = None
+
+            m = re.match(r"^([a-z_]+):\s*(.*)$", line)
+            if not m:
+                raise ValueError(f"{where}:{lineno}: expected 'key:' but found {line!r}")
+            key, rest = m.group(1), m.group(2)
+            if rest in (">-", ">", "|-", "|"):
+                buf = []
+            elif rest == "":
+                items = []
+            else:
+                data[key] = rest.strip().strip('"').strip("'")
+                key = None
+            continue
+
+        if items is not None:
+            # A new entry only when the dash sits at the list's own column.
+            # Deeper lines are continuations, even when they start with '-' —
+            # "--local ..." wrapped inside a folded item is not a new entry,
+            # and reading it as one silently splits a question in half.
+            if dash_indent is None and line.startswith("-"):
+                dash_indent = indent
+            is_entry = (line.startswith("-") and indent == dash_indent)
+            m = re.match(r"^-\s*(.*)$", line) if is_entry else None
+            if m:                       # a new list entry
+                flush_item()
+                rest = m.group(1)
+                if rest in (">-", ">", "|-", "|"):
+                    item = []
+                else:
+                    # A plain one-line entry may be quoted, exactly as a
+                    # top-level scalar may be; strip it the same way.
+                    if len(rest) > 1 and rest[0] == rest[-1] and rest[0] in "\"'":
+                        rest = rest[1:-1]
+                    item = [rest]
+                continue
+            if item is None:
+                raise ValueError(f"{where}:{lineno}: text outside a list item: {line!r}")
+            item.append(line)           # continuation of the folded entry
+            continue
+
+        if buf is not None:
+            buf.append(line)
+            continue
+
+        raise ValueError(f"{where}:{lineno}: unexpected indented line {line!r}")
+
+    flush_scalar()
+    flush_item()
+    if items is not None and key is not None:
+        data[key] = items
+    return data
+
+
+def load(lab):
+    path = os.path.join(CARDS, f"lab{lab:02d}.yml")
+    if not os.path.exists(path):
+        sys.exit(f"hk-card: no question card for lab{lab:02d} ({path})")
+    card = parse_card(open(path, encoding="utf-8").read(), path)
+    missing = (SCALARS - {"notes"} | LISTS) - set(card)
+    if missing:
+        sys.exit(f"hk-card: {path} is missing {', '.join(sorted(missing))}")
+    card["_lab"] = lab
+    if len(card["answer_with"]) != len(card["solution"]):
+        sys.exit(f"hk-card: {path} has {len(card['answer_with'])} questions "
+                 f"but {len(card['solution'])} answers")
+    steps = lab_steps(lab)
+    mapping = card.get("solution_steps", [])
+    if mapping and len(mapping) != len(card["answer_with"]):
+        sys.exit(f"hk-card: {path} maps {len(mapping)} entries to "
+                 f"{len(card['answer_with'])} questions")
+    for i, entry in enumerate(mapping, 1):
+        for ref in str(entry).split():
+            if ref == "-":
+                continue
+            if not ref.isdigit() or not 1 <= int(ref) <= len(steps):
+                sys.exit(f"hk-card: {path} answer {i} names step {ref}, but "
+                         f"lab{lab:02d} has {len(steps)} steps")
+    return card
+
+
+def wrap(text, indent=0, first=None):
+    prefix = " " * indent
+    return textwrap.fill(text, width=WIDTH,
+                         initial_indent=first if first is not None else prefix,
+                         subsequent_indent=prefix,
+                         break_long_words=False, break_on_hyphens=False)
+
+
+def heading(title):
+    return f"{title}\n{'=' * min(len(title), WIDTH)}"
+
+
+def section(name, body):
+    return f"\n{name}\n{'-' * len(name)}\n{body}"
+
+
+def lab_steps(lab):
+    """The lab's own commands, read from the generated LAB.md.
+
+    Never copied into the cards. theory.md is the single source for what to
+    run; bin/extract-labs.py turns its bash blocks into stepNN.sh in the same
+    order this walk produces, so step N here is stepNN.sh there. Hand-copying
+    them into questions/ would drift the moment theory.md is edited.
+
+    Yields (heading, commands, expected) per bash block, in document order.
+    """
+    path = os.path.join(KITS, f"lab{lab:02d}", "LAB.md")
+    if not os.path.exists(path):
+        return []
+    steps, heading, pending = [], None, None
+    lines = open(path, encoding="utf-8").read().split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = re.match(r"^#{2,6}\s+(?:\d+\.\s*)?(.+)$", line)
+        if m and not line.startswith("# "):
+            heading = m.group(1).strip()
+            i += 1
+            continue
+        if line.startswith("```bash"):
+            body, i = [], i + 1
+            while i < len(lines) and not lines[i].startswith("```"):
+                body.append(lines[i])
+                i += 1
+            steps.append([heading, "\n".join(body).strip(), None])
+            pending = steps[-1]
+            i += 1
+            continue
+        # The book states the evidence right after the block that produces it.
+        m = re.match(r"^\*\*(Expected[^:*]*|Baseline|Checkpoint|Pass criterion)[:*]*\*{0,2}:?\s*(.+)$", line)
+        if m and pending is not None and pending[2] is None:
+            text = m.group(2)
+            text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)   # [label](url) -> label
+            pending[2] = re.sub(r"\*\*|`", "", text).strip()
+        i += 1
+    return steps
+
+
+def render_steps(lab, expected):
+    steps = lab_steps(lab)
+    if not steps:
+        return ""
+    out = []
+    for n, (heading, cmds, exp) in enumerate(steps, 1):
+        label = f"STEP {n} OF {len(steps)}"
+        if heading:
+            label += f" — {heading}"
+        out.append(wrap(label))
+        out.append("")
+        out.append(textwrap.indent(cmds, "    "))
+        if expected and exp:
+            out.append("")
+            out.append(wrap(f"Expected: {exp}", indent=4))
+        out.append("")
+    return "\n".join(out).rstrip()
+
+
+def render_question(card):
+    out = [heading(card["title"]), ""]
+    out.append(wrap(f"Related: {card['related']}"))
+    out.append("")
+    out.append(wrap(card["objective"]))
+    out.append(section("WHAT THIS LAB ASKS", wrap(card["question"])))
+    out.append(section("THEORY YOU NEED",
+                       "\n\n".join(wrap(p) for p in card["theory"])))
+    # Stated before the questions, not after: it is what the lab is for, and
+    # knowing it up front is what lets you tell a real result from a lucky one.
+    out.append(section("MAIN LESSON TO LEARN IN THIS LAB",
+                       wrap(card["main_lesson"])))
+    numbered = []
+    for i, q in enumerate(card["answer_with"], 1):
+        numbered.append(wrap(q, indent=4, first=f"{i:>2}. "))
+    out.append(section("QUESTIONS TO ANSWER", "\n\n".join(numbered)))
+    steps = render_steps(card["_lab"], expected=False)
+    if steps:
+        out.append(section("THE LAB'S OWN STEPS",
+                           wrap("Run these in ~/labs/lab%02d, one step at a time. "
+                                "LAB.md has the full text and the manifests."
+                                % card["_lab"]) + "\n\n" + steps))
+    if card.get("notes"):
+        out.append(section("IN THIS LAB VM", wrap(card["notes"])))
+    out.append(section("WHEN YOU ARE DONE",
+                       wrap(f"Check yourself with:  hk solution "
+                            f"{card['title'].split()[1].rstrip(chr(8212)).strip()}")))
+    return "\n".join(out) + "\n"
+
+
+def render_solution(card):
+    steps = lab_steps(card["_lab"])
+    mapping = card.get("solution_steps", [])
+    out = [heading(card["title"]), ""]
+    out.append(wrap("Answers, each followed by the lab's own commands that "
+                    "produce its evidence. Work through the lab and write your "
+                    "own answers first."))
+    for i, (q, a) in enumerate(zip(card["answer_with"], card["solution"]), 1):
+        out.append(section(f"QUESTION {i}", wrap(q)))
+        out.append("")
+        out.append(wrap(a))
+        refs = str(mapping[i - 1]).split() if i <= len(mapping) else []
+        refs = [int(r) for r in refs if r.isdigit()]
+        if not refs:
+            out.append("")
+            out.append(wrap("No command shows this one; it is reasoning about "
+                            "what the lab demonstrates.", indent=2))
+            continue
+        for ref in refs:
+            head, cmds, exp = steps[ref - 1]
+            label = f"Step {ref} of {len(steps)}"
+            if head:
+                label += f" — {head}"
+            out.append("")
+            out.append(wrap(label, indent=2))
+            out.append("")
+            out.append(textwrap.indent(cmds, "      "))
+            if exp:
+                out.append("")
+                out.append(wrap(f"Expected: {exp}", indent=6))
+    out.append(section("MAIN LESSON", wrap(card["main_lesson"])))
+    return "\n".join(out) + "\n"
+
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[1] not in ("question", "solution"):
+        sys.exit("usage: hk-card {question|solution} <lab number>")
+    action, raw = sys.argv[1], sys.argv[2]
+    n = re.sub(r"^[Ll]ab", "", raw)
+    if not n.isdigit() or not 0 <= int(n) <= 10:
+        sys.exit(f"hk-card: '{raw}' is not a lab; the labs are 0 to 10.")
+    card = load(int(n))
+    sys.stdout.write(render_question(card) if action == "question"
+                     else render_solution(card))
+
+
+if __name__ == "__main__":
+    main()

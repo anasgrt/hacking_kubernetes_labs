@@ -1,0 +1,203 @@
+---
+# RKE2, the management cluster. Rancher runs on top of it.
+#
+# RKE2 rather than a second k3s because Rancher's support matrix names RKE2 as
+# a management platform and because keeping the two distributions distinct
+# makes it obvious which cluster a command is talking to.
+
+- name: Load the kernel modules RKE2 needs
+  ansible.builtin.command: "modprobe {{ item }}"
+  loop: [overlay, br_netfilter]
+  changed_when: false
+
+- name: Keep those modules across reboots
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/hk-rke2.conf
+    mode: '0644'
+    content: |
+      # Managed by Ansible.
+      overlay
+      br_netfilter
+
+- name: Configure Kubernetes forwarding
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/70-hk-rke2.conf
+    mode: '0644'
+    content: |
+      # Managed by Ansible.
+      net.ipv4.ip_forward = 1
+      net.bridge.bridge-nf-call-iptables = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+  register: hk_rke2_sysctl
+
+- name: Apply the forwarding settings
+  ansible.builtin.command: sysctl --load /etc/sysctl.d/70-hk-rke2.conf
+  when: hk_rke2_sysctl.changed
+  changed_when: true
+
+- name: Turn off swap for kubelet
+  ansible.builtin.command: swapoff -a
+  when: ansible_facts['swaptotal_mb'] | int > 0
+  changed_when: true
+
+- name: Keep swap off across reboots
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: '^(\s*[^#\s]\S*\s+\S+\s+swap\s+.*)$'
+    replace: '# Disabled by hk-mgmt: \1'
+
+- name: Create the RKE2 configuration directory
+  ansible.builtin.file:
+    path: /etc/rancher/rke2
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Check which RKE2 is installed
+  ansible.builtin.command: /usr/local/bin/rke2 --version
+  register: hk_rke2_installed
+  changed_when: false
+  failed_when: false
+
+- name: Refuse an implicit RKE2 upgrade or downgrade
+  # A Kubernetes version change on a cluster holding Rancher's own data needs a
+  # planned procedure and an etcd snapshot, not a silent reinstall on the next
+  # configure. Change the pin deliberately, or rebuild the machine.
+  ansible.builtin.assert:
+    that: >-
+      hk_rke2_installed.rc != 0
+      or ('rke2 version ' + hk_rke2_version + ' ') in hk_rke2_installed.stdout
+    fail_msg: >-
+      RKE2 {{ hk_rke2_installed.stdout.split(' ')[2] | default('?') }} is installed
+      but labs.yml pins {{ hk_rke2_version }}. Follow the RKE2 upgrade procedure,
+      or run 'bin/hk mgmt destroy' and rebuild.
+
+- name: Install RKE2
+  # The official installer verifies the release's published checksums, so no
+  # digest is pinned here beyond the version itself.
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl -sfL https://get.rke2.io \
+      | INSTALL_RKE2_VERSION='{{ hk_rke2_version }}' \
+        INSTALL_RKE2_TYPE=server \
+        sh -s -
+  args:
+    executable: /bin/bash
+  when: hk_rke2_installed.rc != 0
+  notify: restart rke2
+
+- name: Configure the management cluster
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/rke2/config.yaml
+    mode: '0600'
+  notify: restart rke2
+
+- name: Create the RKE2 addon manifests directory
+  ansible.builtin.file:
+    path: /var/lib/rancher/rke2/server/manifests
+    state: directory
+    mode: '0755'
+
+- name: Give management Pods a DNS record for the Rancher hostname
+  ansible.builtin.template:
+    src: coredns-config.yaml.j2
+    dest: /var/lib/rancher/rke2/server/manifests/rke2-coredns-config.yaml
+    mode: '0600'
+
+- name: Enable and start the RKE2 server
+  ansible.builtin.systemd:
+    name: rke2-server
+    enabled: true
+    daemon_reload: true
+    state: started
+  async: 1200
+  poll: 10
+
+- name: Apply a changed RKE2 configuration now
+  # Handlers otherwise run at the end of the play, after every readiness check
+  # below has already tested the old configuration.
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the management API to report ready
+  # First boot pulls every system image, so this is the slow step: allow it.
+  ansible.builtin.command:
+    argv:
+      - "{{ hk_rke2_kubectl }}"
+      - "--kubeconfig={{ hk_rke2_kubeconfig }}"
+      - --request-timeout=10s
+      - get
+      - --raw=/readyz
+  register: hk_rke2_api
+  until: hk_rke2_api.rc == 0 and hk_rke2_api.stdout == 'ok'
+  retries: 90
+  delay: 10
+  changed_when: false
+
+- name: Wait for the management node to report Ready
+  ansible.builtin.command:
+    argv:
+      - "{{ hk_rke2_kubectl }}"
+      - "--kubeconfig={{ hk_rke2_kubeconfig }}"
+      - wait
+      - --for=condition=Ready
+      - "node/{{ hk_rke2_node_name }}"
+      - --timeout=600s
+  changed_when: false
+
+- name: Put a kubectl on PATH
+  ansible.builtin.file:
+    src: "{{ hk_rke2_kubectl }}"
+    dest: /usr/local/bin/kubectl
+    state: link
+
+- name: Create the user's kube directory
+  ansible.builtin.file:
+    path: "/home/{{ hk_user }}/.kube"
+    state: directory
+    owner: "{{ hk_user }}"
+    group: "{{ hk_user }}"
+    mode: '0700'
+
+- name: Give the user a kubeconfig for the management cluster
+  ansible.builtin.copy:
+    src: "{{ hk_rke2_kubeconfig }}"
+    dest: "/home/{{ hk_user }}/.kube/config"
+    remote_src: true
+    owner: "{{ hk_user }}"
+    group: "{{ hk_user }}"
+    mode: '0600'
+
+- name: Wait for the bundled charts RKE2 installs for itself
+  ansible.builtin.command:
+    argv:
+      - "{{ hk_rke2_kubectl }}"
+      - "--kubeconfig={{ hk_rke2_kubeconfig }}"
+      - -n
+      - kube-system
+      - rollout
+      - status
+      - "{{ item }}"
+      - --timeout=600s
+  loop:
+    - deployment/rke2-coredns-rke2-coredns
+    - daemonset/rke2-ingress-nginx-controller
+  register: hk_rke2_charts
+  until: hk_rke2_charts.rc == 0
+  retries: 30
+  delay: 10
+  changed_when: false
+
+- name: Prove management cluster DNS resolves an external name
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    dig +short +time=5 +tries=2 A {{ hk_dns_probe_name }} @{{ hk_rke2_cluster_dns }}
+    | grep -E '^[0-9]+(\.[0-9]+){3}$'
+  args:
+    executable: /bin/bash
+  register: hk_rke2_dns
+  until: hk_rke2_dns.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false

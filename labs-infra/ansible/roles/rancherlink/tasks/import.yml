@@ -1,0 +1,200 @@
+---
+# Register the lab k3s cluster with Rancher, once. Labs are namespaces inside
+# this one cluster, so there is one cluster record for all eleven of them; the
+# per-lab unit in the UI is a Project, created by the labkit role on deploy.
+
+- name: Prepare the lab VM to reach Rancher
+  ansible.builtin.include_tasks: prepare.yml
+
+- name: Log in to register the lab cluster
+  ansible.builtin.include_tasks: login.yml
+  vars:
+    hk_rancher_login_reason: hk import
+
+- name: Register the lab cluster and wait for its agent
+  block:
+    - name: Require a published Rancher server URL
+      ansible.builtin.uri:
+        url: "https://{{ hk_rancher_hostname }}/v3/settings/server-url"
+        headers: "{{ hk_rancher_headers }}"
+        ca_path: "{{ hk_rancher_ca }}"
+        validate_certs: true
+        use_proxy: false
+      register: hk_link_server_url
+      no_log: true
+
+    - name: Refuse to register against a Rancher with no server URL
+      # While it is empty, Rancher issues registration tokens with no manifest
+      # URL and no downstream cluster can ever register.
+      ansible.builtin.assert:
+        that: hk_link_server_url.json.value | default('') | length > 0
+        fail_msg: >-
+          Rancher has no server-url set, so it cannot issue a registration
+          manifest. Run 'hk mgmt configure', then 'hk import' again.
+
+    - name: Look for an existing record for the lab cluster
+      ansible.builtin.uri:
+        url: "https://{{ hk_rancher_hostname }}/v3/clusters?name={{ hk_rancher_cluster_name }}"
+        headers: "{{ hk_rancher_headers }}"
+        ca_path: "{{ hk_rancher_ca }}"
+        validate_certs: true
+        use_proxy: false
+      register: hk_link_existing
+      no_log: true
+
+    - name: Keep only an exact name match
+      # Rancher matches ?name= loosely, so a prefix would otherwise adopt the
+      # wrong cluster record.
+      ansible.builtin.set_fact:
+        hk_link_match: >-
+          {{ hk_link_existing.json.data | default([])
+             | selectattr('name', 'equalto', hk_rancher_cluster_name) | list }}
+
+    - name: Create the record for the lab cluster
+      ansible.builtin.uri:
+        url: "https://{{ hk_rancher_hostname }}/v3/clusters"
+        method: POST
+        body_format: json
+        body:
+          type: cluster
+          name: "{{ hk_rancher_cluster_name }}"
+          description: >-
+            Hacking Kubernetes lab cluster (k3s). Each deployed lab is a
+            Project here. This cluster is the labs' target; hk-mgmt is not.
+        headers: "{{ hk_rancher_headers }}"
+        ca_path: "{{ hk_rancher_ca }}"
+        validate_certs: true
+        use_proxy: false
+        status_code: 201
+      register: hk_link_created
+      when: hk_link_match | length == 0
+      no_log: true
+
+    - name: Keep the cluster identifier
+      ansible.builtin.set_fact:
+        hk_rancher_cluster_id: >-
+          {{ hk_link_match[0].id if hk_link_match | length > 0
+             else hk_link_created.json.id }}
+
+    - name: Record the cluster identifier for later lab deployments
+      # hk deploy reads this instead of calling the API to look the cluster up.
+      ansible.builtin.copy:
+        content: "{{ hk_rancher_cluster_id }}\n"
+        dest: "{{ hk_rancher_link_dir }}/cluster-id"
+        mode: '0644'
+
+    - name: Wait for the registration manifest
+      ansible.builtin.uri:
+        url: "https://{{ hk_rancher_hostname }}/v3/clusterregistrationtokens?clusterId={{ hk_rancher_cluster_id }}"
+        headers: "{{ hk_rancher_headers }}"
+        ca_path: "{{ hk_rancher_ca }}"
+        validate_certs: true
+        use_proxy: false
+      register: hk_link_tokens
+      until: hk_link_tokens.json.data | map(attribute='manifestUrl') | select('truthy') | list | length > 0
+      retries: 24
+      delay: 5
+      no_log: true
+
+    - name: Fetch the agent manifest
+      # Fetched here with the private CA rather than handed to kubectl as a
+      # URL, so it is verified by the same trust root as every other call.
+      ansible.builtin.uri:
+        url: "{{ hk_link_tokens.json.data | map(attribute='manifestUrl') | select('truthy') | first }}"
+        ca_path: "{{ hk_rancher_ca }}"
+        validate_certs: true
+        use_proxy: false
+        return_content: true
+      register: hk_link_manifest
+      no_log: true
+
+    - name: Wait for any previous agent namespace to finish terminating
+      # `hk unimport` deletes cattle-system without blocking, so an import run
+      # straight afterwards races a namespace still in Terminating. Every
+      # object in the agent manifest is then rejected with "forbidden: unable
+      # to create new content in namespace cattle-system because it is being
+      # terminated", and the import fails for a reason that reads like a
+      # permissions problem.
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        kubectl get namespace cattle-system -o jsonpath='{.status.phase}' 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ hk_kubeconfig }}"
+      register: hk_link_ns_phase
+      until: hk_link_ns_phase.stdout | trim != 'Terminating'
+      retries: 60
+      delay: 5
+      changed_when: false
+
+    - name: Install the Rancher agent in the lab cluster
+      ansible.builtin.command:
+        argv: [kubectl, --request-timeout=60s, apply, -f, '-']
+        stdin: "{{ hk_link_manifest.content }}"
+      environment:
+        KUBECONFIG: "{{ hk_kubeconfig }}"
+      changed_when: true
+
+    - name: Wait for Rancher to report the lab cluster active
+      # Rancher redeploys the agent with its final configuration once it first
+      # connects, so readiness is taken from Rancher, not from the Pod.
+      ansible.builtin.uri:
+        url: "https://{{ hk_rancher_hostname }}/v3/clusters/{{ hk_rancher_cluster_id }}"
+        headers: "{{ hk_rancher_headers }}"
+        ca_path: "{{ hk_rancher_ca }}"
+        validate_certs: true
+        use_proxy: false
+      register: hk_link_state
+      until: hk_link_state.json.state | default('') == 'active'
+      retries: 60
+      delay: 10
+      no_log: true
+
+    - name: Wait for Rancher's admission webhook to be serving
+      # Registering installs rancher.cattle.io's ValidatingWebhookConfiguration
+      # into the lab cluster, and its namespace rules use failurePolicy=Fail.
+      # Until rancher-webhook has endpoints, EVERY namespace create in this
+      # cluster fails — including the next `hk deploy`. The agent reports the
+      # cluster active before the webhook is up, so waiting on Rancher's state
+      # is not enough; wait on the thing that actually gates admission.
+      ansible.builtin.command: >-
+        kubectl -n cattle-system rollout status deployment/rancher-webhook
+        --timeout=600s
+      environment:
+        KUBECONFIG: "{{ hk_kubeconfig }}"
+      register: hk_link_webhook
+      until: hk_link_webhook.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Prove a namespace can still be created
+      # The check that matters: admission works end to end. Without it the
+      # import "succeeds" and the next command run by hand is the one that
+      # discovers it did not.
+      ansible.builtin.shell: |
+        set -uo pipefail
+        kubectl create namespace hk-import-smoke >/dev/null 2>&1
+        rc=$?
+        kubectl delete namespace hk-import-smoke --ignore-not-found --wait=false >/dev/null 2>&1
+        exit $rc
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ hk_kubeconfig }}"
+      register: hk_link_admission
+      until: hk_link_admission.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Show where the lab cluster appears
+      ansible.builtin.debug:
+        msg: >-
+          Lab cluster active in Rancher:
+          https://{{ hk_rancher_hostname }}/dashboard/c/{{ hk_rancher_cluster_id }}/explorer
+
+  always:
+    - name: Revoke the registration login
+      ansible.builtin.include_tasks: logout.yml

@@ -1,0 +1,111 @@
+---
+# Teach the lab VM — the node and its Pods — how to reach Rancher.
+
+- name: Create the Rancher link directory
+  ansible.builtin.file:
+    path: "{{ hk_rancher_link_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install the management CA
+  # Only the public certificate crosses over. The key never leaves hk-mgmt.
+  ansible.builtin.copy:
+    content: "{{ hk_rancher_ca_content }}"
+    dest: "{{ hk_rancher_ca }}"
+    mode: '0644'
+
+- name: Trust the management CA on this node
+  ansible.builtin.copy:
+    src: "{{ hk_rancher_ca }}"
+    dest: /usr/local/share/ca-certificates/hk-rancher.crt
+    remote_src: true
+    mode: '0644'
+  register: hk_link_ca_trust
+
+- name: Refresh the node trust store
+  ansible.builtin.command: update-ca-certificates
+  when: hk_link_ca_trust.changed
+  changed_when: true
+
+- name: Resolve the Rancher hostname on this node
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^.*\s{{ hk_rancher_hostname | regex_escape }}(?:\s|$)'
+    line: "{{ hk_mgmt_ip }} {{ hk_rancher_hostname }}"
+
+- name: Resolve the Rancher hostname from inside the lab cluster
+  # The agent Pod calls home by name, and that name exists only in the two VMs'
+  # hosts files. k3s owns its Corefile but imports every *.server key from the
+  # coredns-custom ConfigMap, which is the supported seam for adding a zone.
+  #
+  # The hosts plugin answers this zone authoritatively: no fallthrough, because
+  # nothing upstream knows .test and a miss should be an immediate NXDOMAIN
+  # rather than a timeout.
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cat <<'MANIFEST' | kubectl apply -f -
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: coredns-custom
+      namespace: kube-system
+    data:
+      hk-rancher.server: |
+        {{ hk_rancher_zone }}:53 {
+            errors
+            hosts {
+              {{ hk_mgmt_ip }} {{ hk_rancher_hostname }}
+            }
+        }
+    MANIFEST
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: "{{ hk_kubeconfig }}"
+  register: hk_link_coredns
+  changed_when: "'configured' in hk_link_coredns.stdout or 'created' in hk_link_coredns.stdout"
+
+- name: Restart CoreDNS so it reads the new zone
+  ansible.builtin.command: kubectl -n kube-system rollout restart deployment/coredns
+  environment:
+    KUBECONFIG: "{{ hk_kubeconfig }}"
+  when: hk_link_coredns.changed
+  changed_when: true
+
+- name: Wait for CoreDNS
+  ansible.builtin.command: >-
+    kubectl -n kube-system rollout status deployment/coredns --timeout=300s
+  environment:
+    KUBECONFIG: "{{ hk_kubeconfig }}"
+  changed_when: false
+
+- name: Prove the lab cluster resolves the Rancher hostname
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    dig +short +time=5 +tries=2 A {{ hk_rancher_hostname }}
+    @$(kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}')
+    | grep -qF '{{ hk_mgmt_ip }}'
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: "{{ hk_kubeconfig }}"
+  register: hk_link_dns
+  until: hk_link_dns.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+
+- name: Prove the lab VM can reach Rancher over HTTPS with that CA
+  ansible.builtin.uri:
+    url: "https://{{ hk_rancher_hostname }}/ping"
+    ca_path: "{{ hk_rancher_ca }}"
+    validate_certs: true
+    use_proxy: false
+    return_content: true
+  register: hk_link_ping
+  until: hk_link_ping.status == 200 and 'pong' in hk_link_ping.content
+  retries: 12
+  delay: 5
+  changed_when: false

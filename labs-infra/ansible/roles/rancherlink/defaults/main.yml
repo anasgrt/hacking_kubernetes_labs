@@ -1,0 +1,16 @@
+---
+# Everything the lab VM needs to talk to Rancher on the management VM.
+# Written by `hk import`; absent when no management VM has been built, which is
+# exactly how the labs stay usable without one.
+hk_rancher_link_dir: /etc/hk-rancher
+hk_rancher_ca: /etc/hk-rancher/ca.crt
+
+# The name the lab cluster appears under in Rancher.
+hk_rancher_cluster_name: hk-labs
+
+hk_kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+# The DNS zone the Rancher hostname sits in — 'hk.test' for 'rancher.hk.test'.
+# A whole zone is added rather than one name because CoreDNS imports server
+# blocks, and a block is scoped to a zone.
+hk_rancher_zone: "{{ hk_rancher_hostname.split('.')[1:] | join('.') }}"

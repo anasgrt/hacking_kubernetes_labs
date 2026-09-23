@@ -1,0 +1,81 @@
+title: Lab 2 — Reject an unsafe Pod before it runs
+related: Chapters 2 and 8
+objective: >-
+  Distinguish API admission from runtime enforcement. The unsafe variant is
+  tested with server-side dry-run and is never persisted.
+question: >-
+  An unsafe Pod spec can be stopped in two very different places: by the API
+  server before anything is stored, or by the runtime once a container is
+  already starting. This lab proves the first, without ever running the unsafe
+  container.
+theory:
+  - >-
+    A request passes authentication, then authorization, then mutating
+    admission, then validating admission, and only then is persisted.
+    Pod Security Admission runs in validating admission, so a rejected
+    Pod is never stored, never scheduled and never started.
+  - >-
+    Server-side dry-run sends the request through that whole chain and
+    discards the result instead of persisting it. Client-side dry-run
+    never reaches the API server at all and consults no admission, so it
+    cannot answer this question.
+  - >-
+    A negative result on its own is weak evidence. A rejection can come
+    from a schema error, a missing permission, the wrong namespace or a
+    typo. A positive control that passes first reduces the difference
+    between the two requests to the single field you changed.
+
+answer_with:
+  - >-
+    Why is the unsafe Pod tested with --dry-run=server instead of being created
+    and then deleted?
+  - >-
+    Why must the valid manifest be tested first? What could a lone failure mean
+    otherwise?
+  - >-
+    Exactly one field changes between the two requests. Which one, and which
+    control rejects it?
+  - >-
+    If the unsafe request is accepted, what three things should you inspect —
+    and why must you not retry it as a real creation?
+solution:
+  - >-
+    Server dry-run runs the whole admission chain, Pod Security Admission
+    included, and returns the verdict without persisting the object. You learn
+    whether admission would reject it while no container ever starts. Creating
+    it and deleting it afterwards would mean the unsafe container really ran,
+    however briefly — which is the outcome the control is supposed to prevent.
+  - >-
+    A rejection on its own is weak evidence: it could be a schema error, a
+    typo, a missing RBAC permission or the wrong namespace. With the valid
+    manifest admitted first, the only difference between the two requests is
+    the single field you changed, so the rejection can be attributed to it.
+  - >-
+    runAsNonRoot goes from true to false. The namespace's Restricted Pod
+    Security Standard rejects it, at the enforce-version pinned when the
+    namespace was created.
+  - >-
+    Inspect the namespace's pod-security.kubernetes.io labels, any admission
+    exemptions configured on the cluster, and the identity making the request —
+    a privileged or exempt user invalidates the whole comparison. Do not retry
+    it for real: the entire point is that admission stops it, and a real
+    creation would start the very container the lab is demonstrating should
+    never run.
+
+solution_steps:
+  # Which of the lab's own steps produce the evidence for each
+  # answer above, in order. '-' means the answer is reasoning
+  # rather than something a command shows.
+  - '2 3'
+  - '2'
+  - '3'
+  - '-'
+
+main_lesson: >-
+  Admission rejects a request before anything runs; the runtime constrains
+  a process that is already running. They are different controls at
+  different moments, and proving the first requires a server-side dry-run
+  against a passing positive control. After this lab you should be able to
+  show that an unsafe Pod would be refused without ever letting it start,
+  and say which field was rejected and by which control.
+

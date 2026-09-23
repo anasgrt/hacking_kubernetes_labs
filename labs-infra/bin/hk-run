@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Run a deployed lab's own steps inside the VM, so its resources exist.
+
+    hk run 01              run the lab, keep what it creates
+    hk run 01 --cleanup    run it including its final teardown step
+
+`hk deploy` deliberately only stages a lab: it creates the namespace and puts
+the files in place, and working through the steps is the exercise. This runs
+them for you when you want the resources to exist — to see a lab in Rancher,
+or to get back to a known state quickly.
+
+Four things make this less trivial than "run every stepNN.sh":
+
+  * The last step of every lab deletes what the lab created. Running it would
+    leave exactly the empty namespace you started with, so it is skipped
+    unless --cleanup is given.
+  * Steps share shell state. Lab 4's step 2 sets API_IP and defines probe_api,
+    which step 3 calls; lab 10 passes FALCO_NS and FALCO_POD forward. So the
+    steps are sourced into ONE shell rather than run as separate processes.
+  * Some steps are meant to fail. A quota rejection, an admission denial and a
+    blocked client all exit non-zero and are the point of their lab, so a
+    non-zero step is reported, never treated as a reason to stop.
+  * Two labs open an interactive menu to choose a context or a RuntimeClass,
+    and one needs a terminal for kubectl exec -it. The menus are answered from
+    what this VM has; the whole run is given a pty for the exec.
+"""
+import base64
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "bin"))
+
+from importlib.machinery import SourceFileLoader
+import importlib.util
+_loader = SourceFileLoader("hk_card", os.path.join(ROOT, "bin", "hk-card"))
+_spec = importlib.util.spec_from_loader("hk_card", _loader)
+hk_card = importlib.util.module_from_spec(_spec)
+_loader.exec_module(hk_card)
+
+LAB_ROOT = "/home/vagrant/labs"
+
+
+def vm_name():
+    spec = open(os.path.join(ROOT, "labs.yml"), encoding="utf-8").read()
+    return re.search(r"^vm:\s*$.*?^  name:\s*(\S+)", spec, re.M | re.S).group(1)
+
+
+def classify(lab):
+    """Decide, per step, whether to run it and how."""
+    plan = []
+    for i, (heading, cmds, _) in enumerate(hk_card.lab_steps(lab), 1):
+        entry = {"n": i, "heading": heading or "", "skip": None}
+        if re.search(r"clean\s*up", heading or "", re.I):
+            entry["skip"] = "teardown — it would delete what the lab just made"
+        elif re.search(r"^\s*select\s|PS3=", cmds, re.M):
+            # Lab 0 picks a kubeconfig context; this VM has one and it is
+            # already pinned. Lab 9 picks a RuntimeClass; this VM has one and
+            # the following step needs the variable, so it is set directly.
+            entry["skip"] = "interactive menu — answered from this VM's configuration"
+        plan.append(entry)
+    return plan
+
+
+def main():
+    args = [a for a in sys.argv[1:]]
+    cleanup = "--cleanup" in args
+    args = [a for a in args if a != "--cleanup"]
+    if len(args) != 1:
+        sys.exit("usage: hk run <lab> [--cleanup]")
+    raw = re.sub(r"^[Ll]ab", "", args[0])
+    if not raw.isdigit() or not 0 <= int(raw) <= 10:
+        sys.exit(f"hk run: '{args[0]}' is not a lab; the labs are 0 to 10.")
+    lab = int(raw)
+    name = f"lab{lab:02d}"
+
+    plan = classify(lab)
+    if not plan:
+        sys.exit(f"hk run: no steps found for {name}; is it deployed? (hk deploy {name})")
+
+    script = [f"cd {LAB_ROOT}/{name} || exit 1"]
+    # Lab 9's menu sets this, and its next step refuses to run without it.
+    script.append('export LAB_RUNTIME_CLASS="${LAB_RUNTIME_CLASS:-'
+                  '$(kubectl get runtimeclass -o jsonpath="{.items[0].metadata.name}" 2>/dev/null)}"')
+    ran = 0
+    for entry in plan:
+        n, heading = entry["n"], entry["heading"]
+        if entry["skip"] and not (cleanup and "teardown" in entry["skip"]):
+            script.append(f'printf "\\n\\033[2m-- step %02d skipped: %s\\033[0m\\n" {n} '
+                          f'"{entry["skip"]}"')
+            continue
+        ran += 1
+        script.append(f'printf "\\n\\033[1m== step %02d  %s\\033[0m\\n" {n} "{heading}"')
+        # Sourced, not executed: later steps depend on variables and functions
+        # earlier ones define. Failures are reported, not fatal — several are
+        # the expected result.
+        script.append(f'source ./step{n:02d}.sh; rc=$?; '
+                      f'[ $rc -ne 0 ] && printf "\\033[33m-- step %02d exited %s '
+                      f'(may be the expected result)\\033[0m\\n" {n} "$rc"')
+    script.append('printf "\\n\\033[1m== done\\033[0m\\n"')
+    script.append(f'kubectl get all -n hk-{name} 2>/dev/null || true')
+
+    # base64, not quoting. The program contains apostrophes, parentheses and
+    # colour escapes, and it has to survive `vagrant ssh -c`, a login shell and
+    # script(1) — three layers of quoting. Hand-escaping got lab 0 and lab 9
+    # wrong on an apostrophe in one message; base64 is alphanumeric and cannot
+    # be misread by any of them.
+    body = base64.b64encode("\n".join(script).encode()).decode()
+    # script(1) gives the session a pty, which lab 10's `kubectl exec -it`
+    # needs and which is harmless everywhere else.
+    remote = (f"printf %s {body} | base64 -d > /tmp/hk-run.sh && "
+              f"script -qec 'bash -l /tmp/hk-run.sh' /dev/null; "
+              f"rm -f /tmp/hk-run.sh")
+
+    print(f"==> running {name}: {ran} step(s)"
+          + ("" if cleanup else ", teardown skipped (use --cleanup to include it)"))
+    r = subprocess.run(["vagrant", "ssh", vm_name(), "-c", remote], cwd=ROOT)
+    sys.exit(r.returncode)
+
+
+if __name__ == "__main__":
+    main()

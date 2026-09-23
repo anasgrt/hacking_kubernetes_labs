@@ -1,0 +1,202 @@
+---
+# Rancher on the management cluster.
+#
+# Installed with its own CA rather than cert-manager: one fewer moving part,
+# and the CA has to be exportable anyway so a browser and the lab cluster's
+# agent can both trust it.
+
+- name: Create the management state directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop:
+    - "{{ hk_rancher_state }}"
+    - "{{ hk_rancher_tls }}"
+    - "{{ hk_rancher_cache }}"
+
+- name: Install the CA kept on the host
+  # The CA outlives the machine. It is generated on the host by `hk ca` and
+  # copied in here, so a rebuilt hk-mgmt issues itself a fresh serving
+  # certificate signed by the SAME root — and the browser that trusted it once
+  # keeps trusting it. Without this the CA would die with the VM and every
+  # `hk destroy` would force a new root into your keychain.
+  ansible.builtin.copy:
+    src: "{{ hk_host_ca_dir }}/{{ item.name }}"
+    dest: "{{ hk_rancher_tls }}/{{ item.name }}"
+    mode: "{{ item.mode }}"
+    owner: root
+    group: root
+  loop:
+    - {name: ca.crt, mode: '0644'}
+    - {name: ca.key, mode: '0600'}
+  loop_control:
+    label: "{{ item.name }}"
+  when: hk_host_ca_dir | default('') | length > 0
+  no_log: true
+
+- name: Install the certificate helper
+  ansible.builtin.copy:
+    src: hk-rancher-tls.sh
+    dest: /usr/local/sbin/hk-rancher-tls
+    mode: '0700'
+
+- name: Create or renew the Rancher serving certificate
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/hk-rancher-tls, "{{ hk_rancher_tls }}", "{{ hk_rancher_hostname }}"]
+  register: hk_rancher_tls_run
+  changed_when: "'changed:' in hk_rancher_tls_run.stdout"
+
+- name: Trust the lab CA inside the VM
+  ansible.builtin.copy:
+    src: "{{ hk_rancher_tls }}/ca.crt"
+    dest: /usr/local/share/ca-certificates/hk-rancher.crt
+    remote_src: true
+    mode: '0644'
+  register: hk_rancher_ca_trust
+
+- name: Refresh the VM trust store
+  ansible.builtin.command: update-ca-certificates
+  when: hk_rancher_ca_trust.changed
+  changed_when: true
+
+- name: Create the user's Rancher directory
+  ansible.builtin.file:
+    path: "/home/{{ hk_user }}/rancher"
+    state: directory
+    owner: "{{ hk_user }}"
+    group: "{{ hk_user }}"
+    mode: '0700'
+
+- name: Publish only the public CA, for the lab cluster and the browser
+  ansible.builtin.copy:
+    src: "{{ hk_rancher_tls }}/ca.crt"
+    dest: "/home/{{ hk_user }}/rancher/ca.crt"
+    remote_src: true
+    owner: "{{ hk_user }}"
+    group: "{{ hk_user }}"
+    mode: '0644'
+
+- name: Install Helm
+  ansible.builtin.shell: |
+    set -euo pipefail
+    arch={{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else 'amd64' }}
+    cd {{ hk_rancher_cache }}
+    curl -fsSLo helm.tgz "https://get.helm.sh/helm-{{ hk_helm_version }}-linux-${arch}.tar.gz"
+    tar -xzf helm.tgz
+    install -m 0755 "linux-${arch}/helm" /usr/local/bin/helm
+    rm -rf helm.tgz "linux-${arch}"
+  args:
+    executable: /bin/bash
+    creates: /usr/local/bin/helm
+
+- name: Create the Rancher namespace and its TLS secrets
+  ansible.builtin.shell: |
+    set -euo pipefail
+    k() { {{ hk_rke2_kubectl }} --kubeconfig={{ hk_rke2_kubeconfig }} --request-timeout=30s "$@"; }
+    k create namespace {{ hk_rancher_namespace }} --dry-run=client -o yaml | k apply -f -
+    k -n {{ hk_rancher_namespace }} create secret tls tls-rancher-ingress \
+      --cert={{ hk_rancher_tls }}/tls.crt --key={{ hk_rancher_tls }}/tls.key \
+      --dry-run=client -o yaml | k apply -f -
+    k -n {{ hk_rancher_namespace }} create secret generic tls-ca \
+      --from-file=cacerts.pem={{ hk_rancher_tls }}/ca.crt \
+      --dry-run=client -o yaml | k apply -f -
+  args:
+    executable: /bin/bash
+  changed_when: true
+  no_log: true
+
+- name: Fetch the pinned Rancher chart
+  ansible.builtin.get_url:
+    url: "https://releases.rancher.com/server-charts/stable/rancher-{{ hk_rancher_chart_version }}.tgz"
+    dest: "{{ hk_rancher_cache }}/rancher-{{ hk_rancher_chart_version }}.tgz"
+    mode: '0600'
+    timeout: 120
+
+- name: Write the Rancher values
+  ansible.builtin.template:
+    src: values.yaml.j2
+    dest: "{{ hk_rancher_state }}/rancher-values.yaml"
+    mode: '0600'
+  no_log: true
+
+- name: Install or reconcile Rancher
+  # --atomic so a failed install rolls back rather than leaving a half-release
+  # that the next run has to reason about.
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/helm
+      - upgrade
+      - --install
+      - rancher
+      - "{{ hk_rancher_cache }}/rancher-{{ hk_rancher_chart_version }}.tgz"
+      - "--kubeconfig={{ hk_rke2_kubeconfig }}"
+      - "--namespace={{ hk_rancher_namespace }}"
+      - "--values={{ hk_rancher_state }}/rancher-values.yaml"
+      - --reset-values
+      - --atomic
+      - --wait
+      - --timeout=15m
+      - --history-max=5
+  changed_when: true
+  no_log: true
+
+# A downstream agent is told where to call home through this setting. While it
+# is empty, Rancher issues registration tokens with no manifest URL and no
+# cluster can register at all — which is the failure `hk import` would hit.
+- name: Wait for Rancher to create the server-url setting
+  ansible.builtin.command:
+    argv:
+      - "{{ hk_rke2_kubectl }}"
+      - "--kubeconfig={{ hk_rke2_kubeconfig }}"
+      - --request-timeout=15s
+      - get
+      - settings.management.cattle.io
+      - server-url
+      - -o
+      - jsonpath={.value}
+  register: hk_rancher_server_url
+  until: hk_rancher_server_url.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+
+- name: Publish the server URL downstream agents will call home to
+  ansible.builtin.command:
+    argv:
+      - "{{ hk_rke2_kubectl }}"
+      - "--kubeconfig={{ hk_rke2_kubeconfig }}"
+      - --request-timeout=30s
+      - patch
+      - settings.management.cattle.io
+      - server-url
+      - --type=merge
+      - -p
+      - '{"value": "https://{{ hk_rancher_hostname }}"}'
+  when: hk_rancher_server_url.stdout != 'https://' + hk_rancher_hostname
+  changed_when: true
+
+- name: Reconcile the lab admin password
+  ansible.builtin.import_tasks: password.yml
+
+- name: Leave access instructions in the VM
+  ansible.builtin.copy:
+    dest: "/home/{{ hk_user }}/rancher/README.txt"
+    owner: "{{ hk_user }}"
+    group: "{{ hk_user }}"
+    mode: '0644'
+    content: |
+      Rancher: https://{{ hk_rancher_hostname }}
+      Username: admin
+      Password: set from labs.yml on every 'hk mgmt configure'; print it with 'hk rancher'.
+
+      From the host, once:
+        sudo sh -c 'printf "\n{{ hk_mgmt_ip }} {{ hk_rancher_hostname }}\n" >> /etc/hosts'
+        hk rancher --ca > hk-rancher-ca.crt   # then trust it in your browser or OS
+
+      The lab cluster appears under Cluster Management as 'hk-labs'.
+      Each deployed lab is a Project in that cluster.
+
+      This machine is not a lab target. The labs run on the hk-labs VM.

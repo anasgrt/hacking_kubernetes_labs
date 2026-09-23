@@ -1,0 +1,75 @@
+---
+# Give one lab its own Rancher Project and move its namespaces into it.
+#
+# This repo runs all eleven labs in a single k3s cluster, so the per-lab unit
+# in Rancher is a Project rather than a cluster. Namespaces join a Project
+# through the field.cattle.io/projectId annotation, which is the same mechanism
+# the UI uses when you move a namespace by hand.
+
+- name: Log in to create this lab's Project
+  ansible.builtin.include_tasks: login.yml
+  vars:
+    hk_rancher_login_reason: "hk deploy {{ hk_lab_name }}"
+
+- name: Create the Project and adopt the lab's namespaces
+  block:
+    - name: Look for an existing Project for this lab
+      ansible.builtin.uri:
+        url: "https://{{ hk_rancher_hostname }}/v3/projects?clusterId={{ hk_rancher_cluster_id }}&name={{ hk_lab_name }}"
+        headers: "{{ hk_rancher_headers }}"
+        ca_path: "{{ hk_rancher_ca }}"
+        validate_certs: true
+        use_proxy: false
+      register: hk_proj_existing
+      no_log: true
+
+    - name: Keep only an exact name match
+      ansible.builtin.set_fact:
+        hk_proj_match: >-
+          {{ hk_proj_existing.json.data | default([])
+             | selectattr('name', 'equalto', hk_lab_name) | list }}
+
+    - name: Create this lab's Project
+      ansible.builtin.uri:
+        url: "https://{{ hk_rancher_hostname }}/v3/projects"
+        method: POST
+        body_format: json
+        body:
+          type: project
+          name: "{{ hk_lab_name }}"
+          clusterId: "{{ hk_rancher_cluster_id }}"
+          description: "Lab {{ hk_lab_id }} — {{ hk_lab_title }}"
+        headers: "{{ hk_rancher_headers }}"
+        ca_path: "{{ hk_rancher_ca }}"
+        validate_certs: true
+        use_proxy: false
+        status_code: 201
+      register: hk_proj_created
+      when: hk_proj_match | length == 0
+      no_log: true
+
+    - name: Keep the Project identifier
+      ansible.builtin.set_fact:
+        hk_proj_id: >-
+          {{ hk_proj_match[0].id if hk_proj_match | length > 0
+             else hk_proj_created.json.id }}
+
+    - name: Move this lab's namespaces into the Project
+      # The annotation is clusterId:projectId, not the bare project id.
+      ansible.builtin.command: >-
+        kubectl annotate namespace {{ item }}
+        field.cattle.io/projectId={{ hk_proj_id }} --overwrite
+      environment:
+        KUBECONFIG: "{{ hk_kubeconfig }}"
+      loop: "{{ hk_lab.namespaces | default([]) }}"
+      changed_when: true
+
+    - name: Show where this lab appears in Rancher
+      ansible.builtin.debug:
+        msg: >-
+          {{ hk_lab_name }} is Project '{{ hk_lab_name }}' in Rancher:
+          https://{{ hk_rancher_hostname }}/dashboard/c/{{ hk_rancher_cluster_id }}/explorer
+
+  always:
+    - name: Revoke the deploy login
+      ansible.builtin.include_tasks: logout.yml

@@ -1,0 +1,79 @@
+title: Lab 5 — Compare Secret files with environment variables
+related: Chapter 6
+objective: >-
+  Observe rotation behaviour using dummy values. The file is mounted normally,
+  not with subPath.
+question: >-
+  The same Secret is delivered to one container twice: once as an environment
+  variable, once as a mounted file. The Secret is then rotated. Only one of the
+  two views ever changes.
+theory:
+  - >-
+    Environment variables are copied into a process image at exec.
+    Nothing in Linux lets another party change a running process's
+    environment afterwards, so an env-delivered credential is fixed for
+    the life of that process.
+  - >-
+    The kubelet re-reads Secret and ConfigMap volumes on its sync
+    period, writes the new content into a fresh directory and atomically
+    swaps a symlink. Readers therefore never see a half-written file,
+    and an already-open path resolves to the new content within roughly
+    a minute.
+  - >-
+    A volume mounted with subPath is a copy taken at mount time and is
+    excluded from that resync. It looks like a file but behaves like an
+    environment variable, which is a common and easily missed reason a
+    rotation appears not to work.
+
+answer_with:
+  - >-
+    After rotation, which of the two views updates and which does not?
+  - >-
+    Why does the file update at all, and what bounds how long it takes?
+  - >-
+    The lab insists the volume is not mounted with subPath. What would subPath
+    do to this experiment?
+  - >-
+    What does this mean for a service that must pick up a rotated credential?
+solution:
+  - >-
+    The projected file eventually shows version-two. The environment variable
+    keeps showing version-one for as long as that process lives.
+  - >-
+    The kubelet re-reads the Secret on its sync period and atomically replaces
+    the volume's data directory, so the open path resolves to new content. The
+    delay is bounded by that sync period plus the kubelet's cache TTL — on the
+    order of a minute by default, which is why the lab polls with a 180-second
+    deadline rather than expecting an instant change. The environment variable
+    cannot change at all: it was copied into the process image at exec.
+  - >-
+    subPath mounts a single file copied at mount time, and the kubelet does not
+    update it on resync. The file would behave exactly like the environment
+    variable, both views would stay at version-one, and the comparison the lab
+    exists to make would silently disappear — while looking like a successful
+    run.
+  - >-
+    It must read the file at each use, or watch it for changes; caching the
+    value at start-up recreates the environment-variable behaviour in your own
+    code. Anything delivered by environment variable requires a restart to
+    rotate. And rotation is not finished when the Secret object is updated — it
+    is finished when every consumer has re-read it, which is a property of the
+    consumers, not of the Secret.
+
+solution_steps:
+  # Which of the lab's own steps produce the evidence for each
+  # answer above, in order. '-' means the answer is reasoning
+  # rather than something a command shows.
+  - '3'
+  - '3'
+  - '2'
+  - '4'
+
+main_lesson: >-
+  How a Secret is delivered decides whether it can be rotated without a
+  restart: mounted files change under a running process, environment
+  variables cannot, and subPath quietly turns a file back into the second
+  case. After this lab you should be able to choose a delivery method from
+  the rotation requirement, and say why a Secret being updated is not the
+  same as a credential having rotated.
+

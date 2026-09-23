@@ -1,0 +1,84 @@
+title: Lab 8 — Distinguish quota rejection from scheduling failure
+related: Chapters 7 and 8
+objective: >-
+  Exceed a one-Pod namespace quota without generating CPU or memory pressure.
+question: >-
+  Two failures look alike in a ticket: "my Pod did not start". One never became
+  an object; the other exists and is waiting. This lab produces the first
+  deliberately, on a cluster with plenty of spare capacity.
+theory:
+  - >-
+    ResourceQuota is enforced by an admission controller, so a request
+    that would exceed any single dimension is refused before the object
+    is stored. Quota counts objects (pods, services, secrets) as well as
+    compute (requests.cpu, requests.memory), and any one exhausted
+    dimension rejects the whole request regardless of headroom
+    elsewhere.
+  - >-
+    Scheduling happens after persistence. A Pod the scheduler cannot
+    place still exists, sits in Pending, and carries FailedScheduling
+    events explaining why. The presence or absence of the object is what
+    distinguishes the two failures.
+  - >-
+    Quota usage lives in the ResourceQuota's status and is maintained by
+    a controller. Admission decides against that recorded usage, so
+    freeing a slot is not visible until the delete completes and the
+    status is updated.
+
+answer_with:
+  - >-
+    The second Pod is rejected. Where exactly does that happen, and what object
+    exists afterwards?
+  - >-
+    How does that differ from a Pod stuck in Pending, and why does confusing
+    the two waste time?
+  - >-
+    The quota allows 100m CPU and the Pod requests 50m. Why is it still
+    rejected?
+  - >-
+    After deleting the first Pod, an immediate retry can still fail. Why?
+solution:
+  - >-
+    In the API server, in the ResourceQuota admission controller, during the
+    create request. The request is refused with an exceeded-quota error and
+    nothing is persisted, so kubectl get pods shows only first. There is no
+    second Pod to describe, no events to read, and nothing for the scheduler to
+    consider.
+  - >-
+    A Pending Pod was admitted and stored; the scheduler then could not place
+    it — no node with enough free capacity, or unsatisfied selectors, affinity
+    or taints. It exists, and kubectl describe shows FailedScheduling events
+    naming the reason. Quota rejection leaves no object at all. Confusing them
+    sends you to inspect node capacity and the scheduler when the real limit is
+    a namespace budget, or to raise quota when the real problem is that nothing
+    can host the Pod.
+  - >-
+    Because the exhausted dimension is pods: '1', not CPU. Quota is enforced
+    per-resource and any single exceeded dimension rejects the whole request,
+    regardless of headroom elsewhere. The lab is built this way on purpose: it
+    produces a genuine quota rejection without creating any CPU or memory
+    pressure, so the result cannot be mistaken for resource exhaustion.
+  - >-
+    Quota usage is recorded in the ResourceQuota's status by a controller, and
+    admission decides against that recorded usage. The delete has to complete
+    and the controller has to update the status before the count drops. Until
+    then admission still sees 1/1 pods used and refuses. Watch the usage shown
+    by describe and retry once it falls.
+
+solution_steps:
+  # Which of the lab's own steps produce the evidence for each
+  # answer above, in order. '-' means the answer is reasoning
+  # rather than something a command shows.
+  - '3'
+  - '3'
+  - '2 3'
+  - '4'
+
+main_lesson: >-
+  Quota refuses a request at admission and leaves nothing behind; the
+  scheduler defers a Pod that already exists and can be inspected.
+  Confusing them sends you to look at node capacity when the limit is a
+  namespace budget, or the reverse. After this lab you should be able to
+  tell the two apart from the evidence alone, and explain why a Pod can be
+  rejected while CPU and memory still have room.
+

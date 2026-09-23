@@ -1,0 +1,15 @@
+---
+# Overridden from labs.yml's rancher block by ansible/mgmt.yml.
+hk_helm_version: v3.21.4
+hk_rancher_chart_version: 2.15.1
+hk_rancher_hostname: rancher.hk.test
+hk_rancher_admin_password: SuperAdmin@123
+
+hk_rancher_namespace: cattle-system
+hk_rancher_state: /etc/hk-mgmt
+hk_rancher_tls: /etc/hk-mgmt/tls
+hk_rancher_cache: /var/cache/hk-mgmt
+
+# Set by bin/hk to the host directory holding the lab CA, so it survives the
+# VM. Empty means the VM generates its own, which dies with the machine.
+hk_host_ca_dir: ''

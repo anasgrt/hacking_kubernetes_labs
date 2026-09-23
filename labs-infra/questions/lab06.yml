@@ -1,0 +1,81 @@
+title: Lab 6 — Demonstrate why image tags are not immutable identities
+related: Chapter 4
+objective: >-
+  Build two harmless local images under one tag and prove that the tag moves.
+  No registry push or cluster change occurs.
+question: >-
+  A tag you have deployed for months still reads the same in your manifest.
+  This lab changes what it points at, twice, and asks you to say precisely what
+  moved and what that does and does not prove.
+theory:
+  - >-
+    A tag is a mutable pointer held in image metadata. Nothing in the
+    format binds a tag to particular content, and moving one is an
+    ordinary, cheap, unlogged operation.
+  - >-
+    Docker's local image ID is the digest of the image configuration. A
+    Kubernetes reference pinned as image@sha256:... names the manifest
+    or index digest published by a registry. They are different values
+    over different documents and cannot be substituted for one another.
+  - >-
+    Pinning a digest guarantees you get the same bytes every time. It
+    says nothing about whether those bytes are trustworthy, which is a
+    separate question answered by provenance, an SBOM or a signature —
+    and imagePullPolicy affects only whether a node bothers to
+    re-resolve the reference.
+
+answer_with:
+  - >-
+    The same tag now yields different output. What actually changed, and what
+    happened to the original image?
+  - >-
+    Why does the lab compare image IDs rather than simply trusting the tag it
+    just built?
+  - >-
+    The lab warns that V1_ID is not interchangeable with a registry digest.
+    What is the difference, and where does it matter?
+  - >-
+    What does this experiment prove, and what does it explicitly not prove?
+solution:
+  - >-
+    Only the tag moved. hk-study-local:current is a pointer that was re-bound
+    to the newly built image. The original image is untouched and still
+    reachable — :v1 continues to print version-one — because the second build
+    created new content rather than modifying old content. Nothing was
+    overwritten; a label was moved.
+  - >-
+    Because the tag is the thing under test. Using it as evidence about itself
+    would be circular: the tag will always resolve to whatever it currently
+    points at. The image ID is derived from content, so two differing IDs are
+    independent proof that the bytes behind the tag are not the same bytes.
+  - >-
+    V1_ID is the local image configuration digest that Docker computes and
+    shows as .Id. A Pod spec pinned as image@sha256:... names the manifest or
+    index digest published by a registry, which covers the manifest document
+    rather than the config blob. They are not the same number and cannot be
+    substituted: pasting a local .Id into a Pod spec produces a reference that
+    will never resolve.
+  - >-
+    It proves tag mutability — that a familiar tag can resolve to different
+    content without any warning. It does not prove that either image is
+    vulnerable, malicious or tampered with; both were built here from harmless
+    input. It is also not a substitute for an SBOM or signature verification.
+    The mitigation it motivates is pinning the registry digest and verifying
+    build provenance separately.
+
+solution_steps:
+  # Which of the lab's own steps produce the evidence for each
+  # answer above, in order. '-' means the answer is reasoning
+  # rather than something a command shows.
+  - '2'
+  - '2'
+  - '1'
+  - '-'
+
+main_lesson: >-
+  A tag is a pointer, not an identity, so the same familiar tag can
+  resolve to different content with no warning and no record. After this
+  lab you should be able to prove content changed using a content-derived
+  identifier rather than the tag, pin a registry digest correctly, and
+  state clearly what that pin does and does not tell you about trust.
+
