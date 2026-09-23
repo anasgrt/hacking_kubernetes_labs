@@ -1,0 +1,15 @@
+# Vagrant's per-machine state, including the insecure SSH keys it generates.
+.vagrant/
+
+# Generated on every run from `vagrant ssh-config`.
+labs-infra/ansible/inventory/hosts.ini
+
+# The public lab CA, exported here by `hk rancher --setup` for the trust step.
+# Harmless, but regenerated whenever it is needed.
+labs-infra/hk-rancher-ca.crt
+
+# The CA's PRIVATE KEY lives in ~/.hk-labs/ca, deliberately outside the
+# repository, so it cannot be committed by accident. Never move it in here.
+
+__pycache__/
+*.pyc

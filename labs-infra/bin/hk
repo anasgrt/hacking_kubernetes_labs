@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # Hacking Kubernetes study labs.
 #
-# One VM, built once, carrying every capability the labs need. Labs are
+# One lab VM, built once, carrying every capability the labs need. Labs are
 # deployed into it one at a time and removed when you are finished.
 #
-#   hk build            Vagrant creates the VM, then Ansible configures it.
+#   hk build            Vagrant creates the lab VM, then Ansible configures it.
 #   hk deploy lab01     Ansible deploys one lab into it.
+#
+# A second, optional VM runs RKE2 and Rancher, so the lab cluster can be
+# watched through a real UI. It is never a lab target:
+#
+#   hk mgmt build       create the management VM and install Rancher.
+#   hk import           register the lab cluster with it.
 #
 # Vagrant and Ansible remain separate tools run in sequence; the Vagrantfile
 # declares no provisioner. `hk build` just runs both for you.
@@ -25,41 +31,87 @@ done
 ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
 cd "$ROOT"
 
+# Absolute, because some commands re-invoke this script and the cd above
+# would otherwise break a relative $0 (`../labs-infra/bin/hk build`).
+HK="$ROOT/bin/hk"
+
 # ansible.cfg sits under ansible/, but we run from the repo root, and Ansible
 # only looks in the current directory. Point at it explicitly or its settings
 # are silently ignored.
 export ANSIBLE_CONFIG="$ROOT/ansible/ansible.cfg"
 
-VM="$(awk '/^vm:/{v=1;next} v&&/^  name:/{print $2;exit}' labs.yml)"
+# Read the two machine names and the Rancher settings out of labs.yml, which
+# is the single source of truth the Vagrantfile and Ansible also read.
+field() { awk -v top="^$1:" -v key="^  $2:" '$0~top{v=1;next} v&&/^[a-z]/{v=0} v&&$0~key{sub(/^[^:]*:[[:space:]]*/,"");print;exit}' labs.yml; }
+
+VM="$(field vm name)"
+MGMT="$(field mgmt name)"
+RANCHER_HOST="$(field rancher hostname)"
+RANCHER_PASS="$(field rancher admin_password)"
+MGMT_IP="$(field mgmt ip)"
+HOME_LABS=/home/vagrant/labs
 
 usage() {
   cat <<'USAGE'
 usage: hk <command> [lab]
 
-THE VM — built once
-  hk build             create the VM and configure it   (Vagrant, then Ansible)
-  hk configure         re-run the Ansible half only
-  hk check             re-check the VM's capabilities
-  hk ssh               shell into it
-  hk stop              shut it down, keep its disk
-  hk destroy           delete the virtual machine
+THE MACHINES — built once
+  hk build             build EVERYTHING: both machines, the Rancher link,
+                       and this Mac's access to it            (~35 min)
+  hk build labs        the lab VM only                        (~15 min)
+  hk build mgmt        the management VM only                 (~20 min)
+  hk configure         re-run the lab VM's Ansible half only
+  hk check             re-check the lab VM's capabilities
+  hk ssh               shell into the lab VM
+  hk stop              shut the lab VM down, keep its disk
+  hk destroy           delete EVERYTHING: both machines, no questions asked
+  hk destroy labs      delete the lab VM only
+  hk destroy mgmt      delete the management VM only
 
 LABS — deployed into the VM, one at a time
   hk list              every lab and whether it is deployed
-  hk deploy <lab>      add a lab to the VM
+  hk deploy <lab>      stage a lab without running it, and print its
+                       questions and answers  (--no-solution: questions only)
   hk status <lab>      what that lab has created so far
   hk reset <lab>       clear what it created, keep it deployed
   hk remove <lab>      take it out of the VM entirely
 
+  hk question <lab>    what that lab asks you to work out
+  hk solution <lab>    the answers, once you have tried
+  hk run <lab>         stage the lab AND run it, so its resources exist
+                       (--cleanup also runs its final teardown step)
+
   hk snapshot          save a restore point of the configured VM
   hk restore           roll the VM back to that restore point
 
+THE MANAGEMENT VM — RKE2 and Rancher; built by `hk build`, never a lab target
+  hk mgmt build        create it and install Rancher   (Vagrant, then Ansible)
+  hk mgmt configure    re-run the Ansible half only
+  hk mgmt check        is Rancher up and reachable
+  hk mgmt ssh          shell into it
+  hk mgmt stop         shut it down, keep its disk
+  hk mgmt destroy      delete it; the labs are unaffected  (= hk destroy mgmt)
+
+  hk import            register the lab cluster with Rancher
+  hk unimport          remove it from Rancher again
+  hk rancher           print the Rancher URL and login
+  hk rancher --ca      print the lab CA, to trust in your browser
+  hk rancher --setup   give THIS Mac access: hosts entry + CA trust
+  hk rancher --print-setup   the same steps, printed to do by hand
+  hk ca                the lab CA this Mac trusts; it survives hk destroy
+  hk ca rotate         replace it (you must then trust the new one)
+
   Getting started
-    hk build           create and configure the VM  (once, ~15 min)
+    hk build           everything, once  (~35 min)
     hk deploy lab01    add Lab 1
     hk ssh             work through it
     hk remove lab01    finished; take it out
     hk deploy lab02    next
+
+  Watching the labs in Rancher, once the lab VM exists
+    hk mgmt build      create the management VM        (once, ~20 min)
+    hk import          register the lab cluster with it
+    hk rancher --setup then open the URL it prints
 USAGE
 }
 
@@ -83,47 +135,195 @@ lab() {
   printf 'lab%02d' "$n"
 }
 
-running() { vagrant status "$VM" 2>/dev/null | grep -qE '\brunning\b'; }
+running() { vagrant status "${1:-$VM}" 2>/dev/null | grep -qE '\brunning\b'; }
 
 need_vm() {
-  running && return 0
-  echo "the VM is not running. Create it with:  hk build" >&2
+  running "$VM" && return 0
+  echo "the lab VM is not running. Create it with:  hk build" >&2
   exit 1
 }
 
+need_mgmt() {
+  running "$MGMT" && return 0
+  echo "the management VM is not running. Create it with:  hk mgmt build" >&2
+  exit 1
+}
+
+# The second argument names the inventory groups this playbook cannot run
+# without; make-inventory refuses, with the command to fix it, if one is down.
 ansible_run() {
   local playbook="$1"; shift
-  need_vm
-  local inv; inv="$(bin/make-inventory)"
+  local groups="$1"; shift
+  local inv; inv="$(bin/make-inventory $groups)"
   echo "==> ansible-playbook $playbook  (inventory: ${inv#"$ROOT"/})"
   ansible-playbook "ansible/$playbook" -i "$inv" "$@"
 }
 
-in_vm() { need_vm; vagrant ssh "$VM" -c "$*"; }
+in_vm()   { need_vm;   vagrant ssh "$VM" -c "$*"; }
+in_mgmt() { need_mgmt; vagrant ssh "$MGMT" -c "$*"; }
+
+# The lab cluster's record in Rancher outlives the machine it describes, so it
+# is removed while the agent can still be reached. Only when the management VM
+# survives the same command — if Rancher is going too, the record goes with it.
+unimport_if_linked() {
+  running "$MGMT" || return 0
+  running "$VM"   || return 0
+  vagrant ssh "$VM" -c 'test -f /etc/hk-rancher/cluster-id' >/dev/null 2>&1 || return 0
+  echo "==> removing the lab cluster from Rancher first"
+  "$HK" unimport || echo "    (could not reach Rancher; remove $VM by hand under Cluster Management)"
+}
+
+# The two host-level changes `hk rancher --setup` made cannot be undone from
+# here: both need sudo, and one is in the system keychain. Say so, because a
+# rebuilt hk-mgmt mints a NEW CA and the stale trusted root is exactly what
+# makes the browser reject the new Rancher.
+destroyed_mgmt_note() {
+  cat <<NOTE
+
+The management VM is gone. Two things on THIS machine outlived it:
+
+  /etc/hosts entry     $MGMT_IP $RANCHER_HOST
+  trusted CA           "Hacking Kubernetes Lab Rancher CA"
+
+Leave them if you plan to rebuild: the hosts entry still applies. The CA does
+not — a rebuilt hk-mgmt mints a new one, so remove the old root before
+trusting the new one, or the browser will keep offering the stale certificate:
+
+  sudo security delete-certificate -c "Hacking Kubernetes Lab Rancher CA" \\
+    -t /Library/Keychains/System.keychain
+NOTE
+}
 
 cmd="${1:-}"; shift || true
 
 case "$cmd" in
   # --- the VM ----------------------------------------------------------
   build)
-    echo "==> step 1/2: creating the VM with Vagrant"
-    vagrant up "$VM"
-    echo "==> step 2/2: configuring it with Ansible"
-    ansible_run site.yml "$@"
-    echo "==> VM ready. Save a restore point:  hk snapshot"
-    echo "==> Then add a lab:                  hk deploy lab01" ;;
-  configure) ansible_run site.yml "$@" ;;
+    # `hk build` means everything, mirroring `hk destroy`: both machines, the
+    # lab cluster registered with Rancher, and this Mac given access to it.
+    # Narrow it with a target when you want one machine: hk build labs.
+    target=""
+    for arg in "$@"; do
+      case "$arg" in
+        all|labs|mgmt) target="$arg" ;;
+        *) echo "usage: hk build [all|labs|mgmt]" >&2; exit 2 ;;
+      esac
+    done
+
+    build_labs() {
+      echo "==> [1/2] creating the lab VM with Vagrant"
+      vagrant up "$VM"
+      echo "==> [2/2] configuring it with Ansible"
+      ansible_run site.yml labvm
+    }
+    build_mgmt() {
+      # The CA is made on THIS machine and handed to the VM, so it survives
+      # every rebuild and you trust it in your browser only once.
+      local ca; ca="$("$ROOT/bin/hk-ca" ensure)"
+      echo "==> [1/2] creating the management VM with Vagrant"
+      vagrant up "$MGMT"
+      echo "==> [2/2] installing RKE2 and Rancher with Ansible"
+      ansible_run mgmt.yml mgmtvm -e "hk_host_ca_dir=$ca"
+    }
+
+    case "${target:-all}" in
+      labs)
+        build_labs
+        echo "==> lab VM ready. Save a restore point:  hk snapshot"
+        echo "==> Then add a lab:                      hk deploy lab01" ;;
+      mgmt)
+        build_mgmt
+        echo "==> Rancher ready. Give this Mac access: hk rancher --setup" ;;
+      all)
+        echo "==> building everything: both VMs, the Rancher link, and this Mac's access"
+        echo "==> about 35 minutes; it will ask for your Mac password near the end"
+        echo
+        echo "==> lab VM"
+        build_labs
+        echo
+        echo "==> management VM"
+        build_mgmt
+        echo
+        echo "==> registering the lab cluster with Rancher"
+        "$HK" import
+        echo
+        # Last, and only here: it is the one step that touches YOUR machine,
+        # so nothing is changed on the Mac until both VMs are proven healthy.
+        echo "==> giving this Mac access to Rancher"
+        if ! "$HK" rancher --setup; then
+          echo
+          echo "The VMs are built and the lab cluster is registered." >&2
+          echo "Only this Mac's access failed; retry it alone with: hk rancher --setup" >&2
+          exit 1
+        fi
+        echo
+        echo "==> everything is up."
+        echo "==>   labs:    hk deploy lab01"
+        echo "==>   Rancher: https://$RANCHER_HOST   (hk rancher for the login)"
+        echo "==>   restore point: hk snapshot" ;;
+    esac ;;
+  configure) ansible_run site.yml labvm "$@" ;;
   check)   in_vm 'sudo hk-lab check' ;;
   ssh)     need_vm; vagrant ssh "$VM" ;;
   stop)    vagrant halt "$VM" ;;
-  destroy) vagrant destroy -f "$VM" ;;
+  destroy)
+    # Destroys without asking, by explicit request. `hk destroy` means
+    # everything: both machines, every lab, Rancher and its CA. Narrow it with
+    # a target when you want one machine: hk destroy labs, hk destroy mgmt.
+    target=""
+    for arg in "$@"; do
+      case "$arg" in
+        -f|--force)    ;;   # accepted and ignored; nothing asks any more
+        all|labs|mgmt) target="$arg" ;;
+        *) echo "usage: hk destroy [all|labs|mgmt]" >&2; exit 2 ;;
+      esac
+    done
+    case "${target:-all}" in
+      all)
+        # No unimport: the Rancher holding that record is going too.
+        vagrant destroy -f "$VM"   || true
+        vagrant destroy -f "$MGMT" || true
+        destroyed_mgmt_note ;;
+      labs)
+        unimport_if_linked
+        vagrant destroy -f "$VM" ;;
+      mgmt)
+        vagrant destroy -f "$MGMT"
+        destroyed_mgmt_note ;;
+    esac ;;
 
   # --- labs ------------------------------------------------------------
   list)    in_vm 'hk-lab list' ;;
   deploy)  name=$(lab "${1:-}"); shift || true
-           ansible_run lab.yml -e "hk_lab_ref=$name" -e hk_action=deploy "$@" ;;
+           # --no-solution is ours, not Ansible's, so it never reaches the
+           # playbook. Everything else is passed straight through.
+           want_solution=1; run_after=0; pass=()
+           for arg in "$@"; do
+             case "$arg" in
+               --no-solution) want_solution=0 ;;
+               --run) run_after=1 ;;
+               *) pass+=("$arg") ;;
+             esac
+           done
+           ansible_run lab.yml labvm -e "hk_lab_ref=$name" -e hk_action=deploy "${pass[@]+"${pass[@]}"}"
+           n=$((10#${name#lab}))
+           echo
+           "$ROOT/bin/hk-card" question "$n"
+           if [ "$want_solution" -eq 1 ]; then
+             echo
+             "$ROOT/bin/hk-card" solution "$n"
+           fi
+           echo
+           if [ "$run_after" -eq 1 ]; then
+             echo
+             "$ROOT/bin/hk-run" "$n"
+           fi
+           echo "Files in $HOME_LABS/$name inside the VM:  hk ssh, then  lab $n"
+           [ "$run_after" -eq 0 ] && echo "Nothing runs until you run it:  hk run $n"
+           [ "$want_solution" -eq 1 ] && echo "Deploy without the answers next time:  hk deploy $name --no-solution"
+           exit 0 ;;
   remove)  name=$(lab "${1:-}"); shift || true
-           ansible_run lab.yml -e "hk_lab_ref=$name" -e hk_action=remove "$@" ;;
+           ansible_run lab.yml labvm -e "hk_lab_ref=$name" -e hk_action=remove "$@" ;;
   status)  name=$(lab "${1:-}"); in_vm "sudo hk-lab status $name" ;;
   reset)   name=$(lab "${1:-}"); in_vm "sudo hk-lab reset $name" ;;
 
@@ -139,6 +339,119 @@ case "$cmd" in
       exit 1
     fi
     vagrant snapshot restore "$VM" clean --no-provision ;;
+
+  # --- the management VM -------------------------------------------------
+  mgmt)
+    sub="${1:-}"; shift || true
+    case "$sub" in
+      build)   exec "$HK" build mgmt ;;
+      configure) ansible_run mgmt.yml mgmtvm -e "hk_host_ca_dir=$("$ROOT/bin/hk-ca" ensure)" "$@" ;;
+      check)
+        # The RKE2 kubeconfig is root-owned and 0600, and sudo does not carry
+        # KUBECONFIG across, so it is named explicitly rather than inherited.
+        need_mgmt
+        in_mgmt "sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml kubectl -n cattle-system get deploy && \
+                 printf 'ping: ' && curl -sS --fail https://$RANCHER_HOST/ping && echo" ;;
+      ssh)     need_mgmt; vagrant ssh "$MGMT" ;;
+      stop)    vagrant halt "$MGMT" ;;
+      destroy) exec "$HK" destroy mgmt "$@" ;;
+      *) echo "usage: hk mgmt {build|configure|check|ssh|stop|destroy}" >&2; exit 2 ;;
+    esac ;;
+
+  # Both machines are needed: the management VM holds the CA, the lab VM
+  # registers. Unlinking deliberately does not require the management VM, so
+  # a broken or deleted Rancher never blocks cleaning up the lab cluster.
+  import)   ansible_run import.yml "labvm mgmtvm" -e hk_link_action=import "$@" ;;
+  unimport) ansible_run import.yml "labvm" -e hk_link_action=unimport "$@" ;;
+
+  rancher)
+    case "${1:-}" in
+      --ca)
+        # Printed rather than written, so the caller chooses where it lands:
+        #   hk rancher --ca > hk-rancher-ca.crt
+        need_mgmt
+        vagrant ssh "$MGMT" -c 'cat /home/vagrant/rancher/ca.crt' 2>/dev/null ;;
+      --setup)
+        # Does the work rather than printing it: adds the hosts entry, trusts
+        # the lab CA, and removes the CAs an earlier hk-mgmt left behind. It
+        # asks for sudo only for those two steps, and verifies the VM is
+        # actually serving before changing anything on this machine.
+        need_mgmt
+        exec "$ROOT/bin/hk-browser-setup" ;;
+      --print-setup)
+        cat <<SETUP
+Give this host access to Rancher. \`hk rancher --setup\` does all of this for
+you; these are the same steps by hand.
+
+1. Resolve the hostname. If an entry for it already exists, correct that one
+   instead of adding a second:
+
+   sudo sh -c 'printf "\n$MGMT_IP $RANCHER_HOST\n" >> /etc/hosts'
+   sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+
+2. Trust the lab CA, so the browser accepts Rancher's certificate:
+
+   hk rancher --ca > hk-rancher-ca.crt
+   sudo security add-trusted-cert -d -r trustRoot -p ssl \\
+     -k /Library/Keychains/System.keychain "\$PWD/hk-rancher-ca.crt"
+
+   A rebuilt hk-mgmt mints a NEW CA under the same name, and macOS only ever
+   adds trust, so remove the old root as well or the browser keeps offering
+   it. \`hk rancher --setup\` does that for you, by digest.
+
+Then open https://$RANCHER_HOST and sign in with the login from: hk rancher
+SETUP
+        ;;
+      '')
+        cat <<INFO
+Rancher:  https://$RANCHER_HOST
+Username: admin
+Password: $RANCHER_PASS
+
+The password is reapplied from labs.yml on every 'hk mgmt configure', so a
+password changed in the UI lasts only until the next one.
+
+Host set-up, once:   hk rancher --setup
+The lab cluster:     Cluster Management -> $VM
+Each deployed lab:   a Project in that cluster
+INFO
+        ;;
+      *) echo "usage: hk rancher [--ca|--setup|--print-setup]" >&2; exit 2 ;;
+    esac ;;
+
+  # Local reads: no VM, no cluster. You can read a lab's questions before
+  # deciding to deploy it, or after destroying everything.
+  question|solution) exec "$ROOT/bin/hk-card" "$cmd" "${1:-}" ;;
+
+  # One command for "give me this lab, working": stage it if it is not
+  # already there, then run its own steps so its resources exist. `hk deploy`
+  # remains the staging-only path for when working through the steps yourself
+  # IS the exercise.
+  run)
+    name=$(lab "${1:-}"); shift || true
+    n=$((10#${name#lab}))
+    cleanup=""; pass=()
+    for arg in "$@"; do
+      case "$arg" in
+        --cleanup) cleanup="--cleanup" ;;
+        *) pass+=("$arg") ;;
+      esac
+    done
+    echo "==> [1/2] staging $name"
+    ansible_run lab.yml labvm -e "hk_lab_ref=$name" -e hk_action=deploy "${pass[@]+"${pass[@]}"}"
+    echo
+    # The questions before the run, never the answers: you are about to watch
+    # the lab produce its evidence, and knowing what to look for is the point.
+    "$ROOT/bin/hk-card" question "$n"
+    echo
+    echo "==> [2/2] running $name"
+    "$ROOT/bin/hk-run" "$n" $cleanup
+    echo
+    echo "Answers:      hk solution $n"
+    echo "Inside the VM: hk ssh, then  lab $n"
+    exit 0 ;;
+
+  ca) exec "$ROOT/bin/hk-ca" "$@" ;;
 
   ''|-h|--help|help) usage ;;
   *) echo "unknown command: $cmd" >&2; echo >&2; usage; exit 2 ;;

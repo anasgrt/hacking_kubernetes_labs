@@ -2,6 +2,11 @@
 # Removal is ordered: cluster-scoped objects first, because a binding left
 # behind can keep rejecting Pods in namespaces that no longer relate to it.
 
+# Before the namespaces go: the Project is removed while its contents still
+# exist, which is the order the Rancher UI expects.
+- name: Take away this lab's Rancher Project
+  ansible.builtin.include_tasks: rancher.yml
+
 - name: Delete the lab's cluster-scoped objects
   ansible.builtin.command: "kubectl delete {{ item }} --ignore-not-found --wait=true"
   environment: &kube

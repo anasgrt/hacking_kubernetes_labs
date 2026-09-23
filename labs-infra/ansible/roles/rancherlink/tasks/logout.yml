@@ -1,0 +1,12 @@
+---
+- name: Revoke the Rancher token
+  ansible.builtin.uri:
+    url: "https://{{ hk_rancher_hostname }}/v3/tokens?action=logout"
+    method: POST
+    headers: "{{ hk_rancher_headers }}"
+    ca_path: "{{ hk_rancher_ca }}"
+    validate_certs: true
+    use_proxy: false
+    status_code: [200, 204]
+  failed_when: false
+  no_log: true

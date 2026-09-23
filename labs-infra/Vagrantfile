@@ -1,38 +1,54 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 #
-# Stage 1 of 2: this file only creates the virtual machine.
+# Stage 1 of 2: this file only creates virtual machines.
 #
 # It runs NO provisioner. A machine that comes up from here is a bare Ubuntu
 # box with nothing installed. Stage 2 is a separate Ansible run:
 #
-#   bin/hk build            stage 1 — vagrant up, bare VM
-#   bin/hk configure        stage 2a — Ansible installs every capability
+#   bin/hk build            stage 1 — vagrant up hk-labs, bare VM
+#   bin/hk configure        stage 2a — Ansible installs every lab capability
 #   bin/hk deploy lab01     stage 2b — Ansible deploys one lab into it
 #
-# There is one VM for all eleven labs. Labs are deployed and removed inside it
-# rather than getting a machine each.
+#   bin/hk mgmt build       the same two steps for the management VM
+#
+# Two machines, with deliberately different lifetimes. hk-labs carries the
+# eleven labs and is the machine they attack. hk-mgmt carries RKE2 and Rancher,
+# watches the lab cluster, and is never a target. labs.yml explains why they
+# are not one machine. hk-mgmt is optional: every lab works without it.
 
 require 'yaml'
 
-SPEC = YAML.load_file(File.join(__dir__, 'labs.yml')).fetch('vm')
+SPEC = YAML.load_file(File.join(__dir__, 'labs.yml'))
+
+# Both machines are described the same way, so they are defined the same way.
+# 'mgmt' is only reachable by name — `vagrant up` with no argument brings up
+# the lab VM alone, so nobody grows a 10 GB Rancher machine by accident.
+MACHINES = [
+  { spec: SPEC.fetch('vm'),   autostart: true  },
+  { spec: SPEC.fetch('mgmt'), autostart: false },
+].freeze
 
 Vagrant.configure('2') do |config|
-  config.vm.define SPEC.fetch('name') do |node|
-    node.vm.box         = SPEC.fetch('box')
-    node.vm.box_version = SPEC.fetch('box_version')
-    node.vm.box_check_update = false
-    node.vm.hostname    = SPEC.fetch('name')
-    node.vm.synced_folder '.', '/vagrant', disabled: true
+  MACHINES.each do |machine|
+    spec = machine.fetch(:spec)
 
-    node.vm.network 'private_network', ip: SPEC.fetch('ip')
+    config.vm.define spec.fetch('name'), autostart: machine.fetch(:autostart) do |node|
+      node.vm.box         = spec.fetch('box')
+      node.vm.box_version = spec.fetch('box_version')
+      node.vm.box_check_update = false
+      node.vm.hostname    = spec.fetch('name')
+      node.vm.synced_folder '.', '/vagrant', disabled: true
 
-    node.vm.provider 'virtualbox' do |vb|
-      vb.name   = SPEC.fetch('name')
-      vb.memory = SPEC.fetch('memory')
-      vb.cpus   = SPEC.fetch('cpus')
-      vb.customize ['modifyvm', :id, '--groups', '/hacking-kubernetes']
-      vb.customize ['modifyvm', :id, '--natdnshostresolver1', 'on']
+      node.vm.network 'private_network', ip: spec.fetch('ip')
+
+      node.vm.provider 'virtualbox' do |vb|
+        vb.name   = spec.fetch('name')
+        vb.memory = spec.fetch('memory')
+        vb.cpus   = spec.fetch('cpus')
+        vb.customize ['modifyvm', :id, '--groups', '/hacking-kubernetes']
+        vb.customize ['modifyvm', :id, '--natdnshostresolver1', 'on']
+      end
     end
   end
 end

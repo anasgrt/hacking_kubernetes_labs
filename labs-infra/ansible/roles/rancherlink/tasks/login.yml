@@ -1,0 +1,33 @@
+---
+# Obtain a short-lived Rancher token.
+#
+# Every cluster and project record is created through the Rancher API as a real
+# user. A provisioning.cattle.io or project resource applied with kubectl is
+# stamped with the creator "system:admin", which is not a Rancher user, and its
+# registration token is then never issued.
+- name: Log in to Rancher
+  ansible.builtin.uri:
+    url: "https://{{ hk_rancher_hostname }}/v3-public/localProviders/local?action=login"
+    method: POST
+    body_format: json
+    body:
+      username: admin
+      password: "{{ hk_rancher_admin_password }}"
+      responseType: json
+      description: "{{ hk_rancher_login_reason | default('hk lab automation') }}"
+      ttl: 1800000
+    ca_path: "{{ hk_rancher_ca }}"
+    validate_certs: true
+    use_proxy: false
+    status_code: 201
+  register: hk_rancher_login
+  until: hk_rancher_login.status == 201
+  retries: 6
+  delay: 5
+  no_log: true
+
+- name: Keep the token for this run
+  ansible.builtin.set_fact:
+    hk_rancher_headers:
+      Authorization: "Bearer {{ hk_rancher_login.json.token }}"
+  no_log: true

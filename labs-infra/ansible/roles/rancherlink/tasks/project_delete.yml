@@ -1,0 +1,41 @@
+---
+# Remove one lab's Rancher Project. The namespaces are deleted by the labkit
+# role either side of this; the Project is the only thing left in Rancher.
+
+- name: Log in to remove this lab's Project
+  ansible.builtin.include_tasks: login.yml
+  vars:
+    hk_rancher_login_reason: "hk remove {{ hk_lab_name }}"
+
+- name: Delete the Project
+  block:
+    - name: Look for this lab's Project
+      ansible.builtin.uri:
+        url: "https://{{ hk_rancher_hostname }}/v3/projects?clusterId={{ hk_rancher_cluster_id }}&name={{ hk_lab_name }}"
+        headers: "{{ hk_rancher_headers }}"
+        ca_path: "{{ hk_rancher_ca }}"
+        validate_certs: true
+        use_proxy: false
+      register: hk_proj_existing
+      failed_when: false
+      no_log: true
+
+    - name: Delete this lab's Project
+      ansible.builtin.uri:
+        url: "https://{{ hk_rancher_hostname }}/v3/projects/{{ item.id }}"
+        method: DELETE
+        headers: "{{ hk_rancher_headers }}"
+        ca_path: "{{ hk_rancher_ca }}"
+        validate_certs: true
+        use_proxy: false
+        status_code: [200, 204, 404]
+      loop: >-
+        {{ hk_proj_existing.json.data | default([])
+           | selectattr('name', 'equalto', hk_lab_name) | list }}
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: true
+
+  always:
+    - name: Revoke the remove login
+      ansible.builtin.include_tasks: logout.yml

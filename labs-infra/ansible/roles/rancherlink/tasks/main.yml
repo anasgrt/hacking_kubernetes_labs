@@ -1,0 +1,8 @@
+---
+- name: Import the lab cluster into Rancher
+  ansible.builtin.include_tasks: import.yml
+  when: hk_link_action == 'import'
+
+- name: Remove the lab cluster from Rancher
+  ansible.builtin.include_tasks: unimport.yml
+  when: hk_link_action == 'unimport'

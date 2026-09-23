@@ -1,0 +1,69 @@
+---
+# Link the lab cluster to Rancher, or unlink it.
+#
+#   bin/hk import      -> hk_link_action=import
+#   bin/hk unimport    -> hk_link_action=unimport
+#
+# Two plays, because the two halves live on two machines: the management VM
+# holds the CA, and the lab VM is what actually registers. Only the public
+# certificate crosses between them.
+
+- name: Collect what the lab VM needs from the management VM
+  hosts: mgmtvm
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Load the fleet definition
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../labs.yml"
+        name: hk_spec
+
+    - name: Read the public CA
+      # slurp, not fetch: the certificate goes straight into the next play
+      # without landing on the controller's disk. Only the public certificate
+      # is read; the key never leaves this machine.
+      ansible.builtin.slurp:
+        src: /etc/hk-mgmt/tls/ca.crt
+      register: hk_mgmt_ca
+
+    - name: Publish it to the play that needs it
+      ansible.builtin.set_fact:
+        hk_rancher_ca_content: "{{ hk_mgmt_ca.content | b64decode }}"
+
+- name: Link the lab cluster to Rancher
+  hosts: labvm
+  become: true
+  gather_facts: false
+
+  vars:
+    hk_link_action: import
+    hk_mgmt_host: "{{ groups['mgmtvm'] | first }}"
+
+  pre_tasks:
+    - name: Load the fleet definition
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../labs.yml"
+        name: hk_spec
+
+    - name: Require a management VM for an import
+      ansible.builtin.assert:
+        that: groups['mgmtvm'] | default([]) | length > 0
+        fail_msg: >-
+          No management VM is running. Build it with 'hk mgmt build' first.
+      when: hk_link_action == 'import'
+
+    - name: Take the Rancher settings from the fleet definition
+      ansible.builtin.set_fact:
+        hk_mgmt_ip: "{{ hk_spec.mgmt.ip }}"
+        hk_rancher_hostname: "{{ hk_spec.rancher.hostname }}"
+        hk_rancher_admin_password: "{{ hk_spec.rancher.admin_password }}"
+        hk_rancher_cluster_name: "{{ hk_spec.vm.name }}"
+
+    - name: Carry the CA over from the management play
+      ansible.builtin.set_fact:
+        hk_rancher_ca_content: "{{ hostvars[hk_mgmt_host]['hk_rancher_ca_content'] }}"
+      when: hk_link_action == 'import'
+
+  roles:
+    - role: rancherlink

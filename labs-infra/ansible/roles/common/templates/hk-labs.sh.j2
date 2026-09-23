@@ -20,10 +20,19 @@ k() {
 
 new_lab() {
   local namespace="$1"
-  k create namespace "$namespace" || return 1
+  # Lab 0 prints this as a plain `create`, which is right on a bare cluster.
+  # Here `hk deploy` has already created the namespace with exactly these
+  # labels, so a plain create would fail on the FIRST step of every lab and
+  # stop the run before it began. Create only when missing, then reassert the
+  # labels — the end state is identical to Lab 0's, and repeating a step is
+  # no longer an error.
+  if ! k get namespace "$namespace" >/dev/null 2>&1; then
+    k create namespace "$namespace" || return 1
+  fi
   k label namespace "$namespace" \
     pod-security.kubernetes.io/enforce=restricted \
-    pod-security.kubernetes.io/enforce-version={{ hk_psa_version }} || return 1
+    pod-security.kubernetes.io/enforce-version={{ hk_psa_version }} \
+    --overwrite || return 1
 }
 
 # `lab 4` jumps to Lab 4's working directory.
@@ -39,6 +48,14 @@ lab() {
     return 1
   fi
 }
+
+# Every lab ships its commands as stepNN.sh, and those run in a CHILD bash.
+# A shell function is not inherited by a child process unless it is exported,
+# so without this `bash step02.sh` fails with "k: command not found" — the
+# lab's own scripts would be unrunnable while the same commands typed by hand
+# worked fine. Exported functions reach bash children only, which is what the
+# step scripts are (`#!/usr/bin/env bash`).
+export -f k new_lab lab
 
 command -v kubectl >/dev/null && source <(kubectl completion bash) 2>/dev/null
 complete -o default -F __start_kubectl k 2>/dev/null

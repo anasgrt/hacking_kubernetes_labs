@@ -28,6 +28,21 @@
     mode: preserve
     force: false
 
+- name: Put this lab's questions beside its files
+  # Rendered on the controller, because the card renderer and the cards live
+  # there. Only QUESTIONS.txt is shipped: the answers stay on the host behind
+  # `hk solution`, so the VM never contains the solution to a lab you are in
+  # the middle of. Same reason deploy stages a lab and does not solve it.
+  ansible.builtin.copy:
+    content: "{{ lookup('ansible.builtin.pipe', hk_card_cmd) }}\n"
+    dest: "{{ hk_lab_root }}/{{ hk_lab_name }}/QUESTIONS.txt"
+    owner: "{{ hk_user }}"
+    group: "{{ hk_user }}"
+    mode: '0644'
+  vars:
+    hk_card_cmd: "{{ playbook_dir }}/../bin/hk-card question {{ hk_lab_id }}"
+  failed_when: false
+
 - name: Create the lab's namespaces under the Restricted standard
   # Mirrors the book's new_lab helper: create, then pin the enforced Pod
   # Security Standard and its version.
@@ -36,6 +51,13 @@
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
   loop: "{{ hk_lab.namespaces | default([]) }}"
   register: hk_ns
+  # Once this cluster is imported, Rancher's admission webhook gates namespace
+  # creation with failurePolicy=Fail. It restarts on its own occasionally, and
+  # after `hk restore` or a reboot it takes a moment to serve. Retry rather
+  # than fail a lab deployment on a webhook that is merely starting.
+  until: hk_ns.rc == 0 or 'AlreadyExists' in hk_ns.stderr
+  retries: 30
+  delay: 10
   changed_when: hk_ns.rc == 0
   failed_when: hk_ns.rc != 0 and 'AlreadyExists' not in hk_ns.stderr
 
@@ -47,6 +69,10 @@
     hk-lab={{ hk_lab_name }} --overwrite
   environment: *kube
   loop: "{{ hk_lab.namespaces | default([]) }}"
+  register: hk_ns_label
+  until: hk_ns_label.rc == 0
+  retries: 30
+  delay: 10
   changed_when: false
 
 - name: Record that this lab is deployed
@@ -59,8 +85,5 @@
     dest: "{{ hk_store }}/{{ hk_lab_name }}/.deployed"
     mode: '0644'
 
-- name: Report where to start
-  ansible.builtin.debug:
-    msg: >-
-      {{ hk_lab_name }} deployed. Files in {{ hk_lab_root }}/{{ hk_lab_name }};
-      read LAB.md, then work through the steps.
+- name: Give this lab its own Rancher Project
+  ansible.builtin.include_tasks: rancher.yml

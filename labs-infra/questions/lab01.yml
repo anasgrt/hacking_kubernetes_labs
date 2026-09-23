@@ -1,0 +1,82 @@
+title: Lab 1 — Prove the Pod filesystem boundary
+related: Chapter 2
+objective: >-
+  Compare two otherwise identical nonroot Pods. One can write to its root
+  mount; the other cannot. Both can use /tmp.
+question: >-
+  readOnlyRootFilesystem is one of the most recommended container settings.
+  This lab makes it produce a measurable difference between two Pods that are
+  identical in every other respect, and asks you to be precise about what it
+  did and did not stop.
+theory:
+  - >-
+    A write can fail for two unrelated reasons: the filesystem is
+    mounted read-only (EROFS, errno 30), or the calling UID lacks
+    permission on the path (EACCES, errno 13). In a shell both look like
+    a refusal, and only the errno separates them.
+  - >-
+    readOnlyRootFilesystem is a container-level securityContext field
+    and applies to that container's root mount. Volumes mounted into the
+    tree — emptyDir, configMap, secret, hostPath — are separate mounts
+    that keep their own write permissions, which is why a read-only
+    container can still write to /tmp.
+  - >-
+    runAsNonRoot and runAsUser are about identity;
+    readOnlyRootFilesystem is about the mount. They fail differently and
+    defend against different things, so an experiment that changes both
+    at once cannot tell you which one acted.
+
+answer_with:
+  - >-
+    Both Pods run as UID 10001. Why does the test write to /var/tmp rather than
+    a root-owned path such as /etc?
+  - >-
+    Which errno proves the boundary under test, and which one would prove
+    something else?
+  - >-
+    The readonly Pod cannot write to /var/tmp but can write to /tmp. Why?
+  - >-
+    Name three things readOnlyRootFilesystem does not protect against.
+solution:
+  - >-
+    /var/tmp is world-writable in this image and is part of the root mount, so
+    UID 10001 would be permitted to write there if the mount allowed it. That
+    isolates a single variable. Writing to /etc would be refused for a UID
+    reason even on a writable root, so the failure would prove nothing about
+    readOnlyRootFilesystem.
+  - >-
+    errno 30, EROFS, "Read-only file system", proves the mount is read-only.
+    errno 13, EACCES, would only prove this UID lacks permission on that path —
+    a different control that would be present with or without the setting.
+  - >-
+    /tmp is an explicit emptyDir volume mounted over the root filesystem.
+    readOnlyRootFilesystem makes the container's root mount read-only; it says
+    nothing about volumes mounted into it, which carry their own mount options.
+  - >-
+    It does not protect mounted volumes — emptyDir, configMap, secret,
+    hostPath all stay writable if declared so. It does not prevent writes to
+    /tmp, which most images and runtimes need. And it does nothing about
+    network egress, memory-resident tooling, or reading sensitive files. It
+    removes one persistence mechanism; it is not a containment boundary. The
+    step below makes that concrete: dropped capabilities, NoNewPrivs and a
+    seccomp filter are separate controls doing separate jobs, and the book
+    notes even together they do not stop the application reading its own
+    credentials.
+
+solution_steps:
+  # Which of the lab's own steps produce the evidence for each
+  # answer above, in order. '-' means the answer is reasoning
+  # rather than something a command shows.
+  - '3'
+  - '3'
+  - '3'
+  - '4'
+
+main_lesson: >-
+  readOnlyRootFilesystem removes one persistence path; it is not a
+  containment boundary and it does not touch mounted volumes, /tmp,
+  network egress or anything the process can read. After this lab you
+  should be able to design a Pod that can write only where you intended,
+  and prove which control acted by the errno rather than by the fact that
+  something failed.
+

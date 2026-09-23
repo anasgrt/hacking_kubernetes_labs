@@ -1,0 +1,83 @@
+title: Lab 3 — Demonstrate indirect Secret access through Pod creation
+related: Chapters 6 and 8
+objective: >-
+  Prove that denying direct Secret reads does not remove every path to Secret
+  data.
+question: >-
+  An identity is explicitly denied get on Secrets, and can-i confirms it. It
+  then reads a Secret anyway. This lab is about the gap between what RBAC
+  answers and what an identity can actually obtain.
+theory:
+  - >-
+    RBAC authorizes the request you send: a verb, on a resource, as an
+    identity. It says nothing about what happens afterwards on your
+    behalf.
+  - >-
+    When a Pod references a Secret, the kubelet on the assigned node
+    resolves and mounts it. That read is performed with the kubelet's
+    privileges and is never attributed to the identity that created the
+    Pod, so RBAC has no request to deny.
+  - >-
+    kubectl auth can-i evaluates authorization only. It does not run
+    admission, so a Pod that can-i says you may create can still be
+    refused by Pod Security Admission or a ValidatingAdmissionPolicy —
+    and one that RBAC permits may be the only control standing between
+    an identity and every Secret in the namespace.
+
+answer_with:
+  - >-
+    can-i get secrets says no, yet the Secret's value reaches the container.
+    Describe the mechanism precisely — who performs the read?
+  - >-
+    Why does the lab use k create rather than k apply for this identity?
+  - >-
+    can-i answered correctly and was still insufficient. What question does it
+    not answer?
+  - >-
+    What control would actually close this path, and why can RBAC alone not
+    express it?
+solution:
+  - >-
+    The identity holds create on pods. It submits a Pod whose spec references
+    the Secret. The kubelet on the assigned node resolves that reference and
+    mounts the Secret into the container, using its own privileges rather than
+    the submitter's. No Secret read is ever attributed to the identity, so RBAC
+    never has an opportunity to deny it. In effect, create pods in a namespace
+    is transitively read any Secret in that namespace.
+  - >-
+    The Role grants only create on pods. kubectl apply first performs a get,
+    and may patch, to compute the diff, and this identity can do neither. The
+    request would fail for an authorisation reason unrelated to the point being
+    made. Naming the verb explicitly keeps the experiment aligned with the
+    permission model under test.
+  - >-
+    Whether admission would accept the Pod. can-i is pure RBAC; a Pod that RBAC
+    permits can still be rejected by Pod Security Admission or by a
+    ValidatingAdmissionPolicy. "Can create Pods" is therefore only meaningful
+    when assessed together with the admission policies actually in force — which
+    is what Lab 7 builds.
+  - >-
+    An admission policy that constrains which Secrets a Pod may reference, or
+    forbids secret volumes and secretKeyRef for that identity — a
+    ValidatingAdmissionPolicy of the kind Lab 7 writes. RBAC cannot express it
+    because RBAC authorises verbs on resources, and the offending read is
+    performed by the kubelet, not by the identity. There is no Secret request
+    from that identity for RBAC to deny.
+
+solution_steps:
+  # Which of the lab's own steps produce the evidence for each
+  # answer above, in order. '-' means the answer is reasoning
+  # rather than something a command shows.
+  - '3'
+  - '3'
+  - '2'
+  - '-'
+
+main_lesson: >-
+  Ask what an identity can obtain, not what it is authorized to request.
+  Permission to create Pods in a namespace is effectively permission to
+  read every Secret in it, because the kubelet performs that read on the
+  workload's behalf. After this lab you should be able to explain why
+  denying get on Secrets does not protect them, and name the control that
+  actually closes the path.
+

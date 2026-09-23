@@ -32,6 +32,9 @@
   roles:
     - role: common
       tags: [common]
+    # Before k3s: it writes the resolv.conf k3s hands to every Pod.
+    - role: dnsupstream
+      tags: [dns]
     - role: docker
       tags: [docker]
     - role: k3s

@@ -1,0 +1,13 @@
+---
+# Where the detected upstream is written. Both k3s and RKE2 are pointed at this
+# file through their own config.yaml, so kubelet hands it to every Pod.
+hk_cluster_resolv_conf: /etc/hk-cluster-resolv.conf
+
+# The node's own nameservers are tried first, in order; these are the fallback
+# when none of them answers — which is the normal case under VirtualBox NAT on
+# an IPv6-primary host. Override if this network blocks public resolvers.
+hk_dns_fallbacks:
+  - 1.1.1.1
+  - 8.8.8.8
+
+hk_dns_probe_name: github.com

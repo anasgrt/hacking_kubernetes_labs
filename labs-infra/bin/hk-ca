@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# The lab CA, kept on THIS machine rather than inside the VM.
+#
+# The CA is what your browser trusts. If it lived in hk-mgmt it would die with
+# the machine, and every `hk destroy` would force you to trust a new root. Kept
+# here, it outlives any number of rebuilds: `hk mgmt build` copies it into the
+# new VM, which then issues itself a fresh serving certificate signed by the
+# same CA. You trust it once, ever.
+#
+#   hk ca                 where it is, and its fingerprint
+#   hk ca rotate          replace it (you must then trust the new one)
+#   hk ca adopt           take over the CA of a running hk-mgmt
+#
+# The private key is here, readable only by you. That is the trade for not
+# re-trusting a root every rebuild, and it is the right one for a local lab:
+# this CA signs one name, on one host-only network, on your own machine.
+set -euo pipefail
+
+DIR="${HK_CA_DIR:-$HOME/.hk-labs/ca}"
+CN='Hacking Kubernetes Lab Rancher CA'
+
+generate() {
+  mkdir -p "$DIR"; chmod 700 "$DIR"
+  ( umask 077
+    openssl req -x509 -newkey rsa:3072 -nodes -sha256 -days 3650 \
+      -keyout "$DIR/ca.key" -out "$DIR/ca.crt" -subj "/CN=$CN" \
+      -addext 'basicConstraints=critical,CA:TRUE' \
+      -addext 'keyUsage=critical,keyCertSign,cRLSign' 2>/dev/null )
+  chmod 600 "$DIR/ca.key"; chmod 644 "$DIR/ca.crt"
+}
+
+# An incomplete, expired or mismatched CA is never silently replaced: failing
+# is recoverable from a backup, a new CA breaks every trust already granted.
+verify() {
+  test -s "$DIR/ca.key" && test -s "$DIR/ca.crt"
+  openssl x509 -in "$DIR/ca.crt" -checkend 2592000 -noout >/dev/null
+  [ "$(openssl pkey -in "$DIR/ca.key" -pubout 2>/dev/null)" \
+    = "$(openssl x509 -in "$DIR/ca.crt" -pubkey -noout)" ]
+}
+
+case "${1:-show}" in
+  ensure)
+    # Used by `hk mgmt build`. Prints the directory; says so when it creates one.
+    if [ -e "$DIR/ca.crt" ] || [ -e "$DIR/ca.key" ]; then
+      verify || { echo "hk ca: $DIR holds an unusable CA. Fix or 'hk ca rotate'." >&2; exit 1; }
+    else
+      generate
+      echo "hk ca: created a lab CA in $DIR (trust it once with: hk rancher --setup)" >&2
+    fi
+    printf '%s\n' "$DIR" ;;
+
+  path) printf '%s\n' "$DIR" ;;
+
+  show)
+    if ! [ -e "$DIR/ca.crt" ]; then
+      echo "No lab CA yet. One is created by: hk build   (or: hk ca ensure)"
+      exit 0
+    fi
+    verify || echo "WARNING: this CA is incomplete, expired or mismatched." >&2
+    echo "Lab CA:      $DIR/ca.crt"
+    echo "Private key: $DIR/ca.key   (stays on this machine)"
+    openssl x509 -in "$DIR/ca.crt" -noout -subject -dates -fingerprint -sha256 \
+      | sed 's/^/  /'
+    echo
+    echo "Kept here so it survives 'hk destroy'. Trust it once: hk rancher --setup" ;;
+
+  adopt)
+    # Take over the CA of a running hk-mgmt, so a VM built before the CA moved
+    # to the host keeps the certificate you have already trusted.
+    vm="${2:-hk-mgmt}"
+    mkdir -p "$DIR"; chmod 700 "$DIR"
+    ( umask 077
+      vagrant ssh "$vm" -c 'sudo cat /etc/hk-mgmt/tls/ca.crt' 2>/dev/null > "$DIR/ca.crt.new"
+      vagrant ssh "$vm" -c 'sudo cat /etc/hk-mgmt/tls/ca.key' 2>/dev/null > "$DIR/ca.key.new" )
+    grep -q 'BEGIN CERTIFICATE' "$DIR/ca.crt.new" && grep -q 'PRIVATE KEY' "$DIR/ca.key.new" || {
+      rm -f "$DIR/ca.crt.new" "$DIR/ca.key.new"
+      echo "hk ca: could not read a CA from $vm. Is it running?" >&2; exit 1; }
+    mv "$DIR/ca.crt.new" "$DIR/ca.crt"; mv "$DIR/ca.key.new" "$DIR/ca.key"
+    chmod 600 "$DIR/ca.key"; chmod 644 "$DIR/ca.crt"
+    echo "Adopted the CA from $vm into $DIR; it now survives 'hk destroy'."
+    openssl x509 -in "$DIR/ca.crt" -noout -fingerprint -sha256 | sed 's/^/  /' ;;
+
+  rotate)
+    # Deliberate, and never automatic: every browser and every imported cluster
+    # that trusts the old root stops trusting Rancher the moment this runs.
+    if [ -e "$DIR/ca.crt" ]; then
+      ts="$(date +%Y%m%d%H%M%S)"
+      mkdir -p "$DIR/superseded"
+      mv "$DIR/ca.crt" "$DIR/superseded/ca.$ts.crt"
+      mv "$DIR/ca.key" "$DIR/superseded/ca.$ts.key" 2>/dev/null || true
+      echo "Kept the old CA in $DIR/superseded/ca.$ts.crt"
+    fi
+    generate
+    echo "New lab CA in $DIR."
+    echo "Re-issue Rancher's certificate and re-trust it:"
+    echo "  hk mgmt configure && hk rancher --setup" ;;
+
+  *) echo "usage: hk ca [show|ensure|path|adopt|rotate]" >&2; exit 2 ;;
+esac

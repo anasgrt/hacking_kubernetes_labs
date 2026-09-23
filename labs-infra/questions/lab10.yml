@@ -1,0 +1,93 @@
+title: Lab 10 — Follow a harmless shell event into Falco
+related: Chapter 9 and Appendix A
+objective: >-
+  Validate the complete sensor-to-alert path and preserve a small evidence
+  bundle before deleting the workload.
+question: >-
+  Falco is installed and its Pods are Ready. This lab refuses to treat that as
+  detection, and instead follows one deliberately harmless action from the
+  kernel all the way to a line you can read.
+theory:
+  - >-
+    Falco runs as a DaemonSet and reads syscalls from the kernel of the
+    node it is on, through an eBPF probe or a kernel module. A sensor
+    only ever observes events from its own node, so the sensor that
+    matters is the one co-located with the workload.
+  - >-
+    The default Terminal shell in container rule matches a shell started
+    with a terminal attached, which is what kubectl exec -it allocates.
+    Without -t there is no terminal, the condition may not match, and a
+    working sensor looks broken.
+  - >-
+    Detection is a chain: kernel, sensor, rule evaluation, output
+    backend, and somewhere the alert is read. Every link can fail
+    independently, and a Ready sensor Pod only demonstrates that one of
+    them is up.
+
+answer_with:
+  - >-
+    Why does the lab locate the Falco Pod on the workload's own node rather
+    than any Ready Falco Pod?
+  - >-
+    What triggers the alert, and why does the lab insist on an interactive
+    terminal?
+  - >-
+    Discovery requires exactly one Ready Falco Pod on that node. Why stop if it
+    finds zero, and why stop if it finds several?
+  - >-
+    A successful alert proves the path works. What does it still not tell you?
+solution:
+  - >-
+    Because a Falco sensor reads the kernel of the node it runs on. Only the
+    sensor co-located with the workload can observe that workload's syscalls; a
+    sensor on another node will never see the event, however healthy it is. On
+    this single-node VM the lookup is trivially satisfied, but it is the
+    correct pattern — on a real cluster, checking "some Falco Pod is Ready"
+    while your workload runs elsewhere is how absence of an alert gets
+    misread as absence of an event.
+  - >-
+    kubectl exec with -it allocates a TTY and starts a shell inside the
+    container, which is what the terminal-shell rule matches. Without -t there
+    is no terminal allocation, the rule's condition may not match, and the lab
+    appears to fail while the sensor is working correctly. The command only
+    prints identity and exits; it installs nothing and reads no credentials.
+  - >-
+    Zero means no sensor covers this workload, so the absence of an alert is
+    uninformative — you would be proving nothing rather than proving a failure.
+    Several means the label selector is matching more than the sensor you think
+    it is, perhaps a second release or a custom installation, so an alert
+    cannot be attributed to a known source. Either way the evidence chain is
+    broken before the test begins, so the honest move is to fix the sensor
+    installation first.
+  - >-
+    It proves one path end to end: kernel, sensor, rule evaluation, output
+    backend, and the log you read. It says nothing about coverage of any other
+    rule, whether the ruleset is tuned for this environment, whether alerts are
+    retained, shipped anywhere or correlated, or whether a human or system is
+    actually watching. A single working detection path is a prerequisite for a
+    detection programme, not evidence of one.
+
+solution_steps:
+  # Which of the lab's own steps produce the evidence for each
+  # answer above, in order. '-' means the answer is reasoning
+  # rather than something a command shows.
+  # Step 1 lists every Falco Pod; step 2 is where the workload's node
+  # is read and the sensor on THAT node is selected, and where the
+  # exactly-one check lives.
+  - '1 2'
+  - '3'
+  - '2'
+  - '4'
+
+main_lesson: >-
+  A healthy sensor is not detection. Validate the whole path with a
+  harmless event you caused yourself, observed on the node that would have
+  to see it, and correlate the alert back to the workload that produced
+  it. After this lab you should be able to say which link of the chain a
+  missing alert implicates, and what a single successful alert still does
+  not tell you about coverage, tuning or whether anyone is watching.
+
+notes: >-
+  Falco runs continuously in this VM, so its log also contains activity from
+  whatever else you have been doing. That is realistic, and it is why the lab
+  greps for a marker it created rather than reading the newest line.

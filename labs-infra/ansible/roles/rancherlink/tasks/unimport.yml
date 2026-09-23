@@ -1,0 +1,162 @@
+---
+# Remove the lab cluster from Rancher, agent and all.
+#
+# Ordered deliberately. The record goes first, while the agent can still be
+# reached, so Rancher tears its own side down; then the agent's traces are
+# removed locally. The local half runs unconditionally — unimport is the
+# recovery path, so a Rancher that is stopped, broken or already deleted must
+# never be able to block it.
+
+- name: Check whether this VM is linked to a Rancher
+  ansible.builtin.stat:
+    path: "{{ hk_rancher_ca }}"
+  register: hk_unlink_ca
+
+- name: Remove the cluster record from Rancher
+  when: hk_unlink_ca.stat.exists
+  block:
+    - name: Log in to deregister the lab cluster
+      ansible.builtin.include_tasks: login.yml
+      vars:
+        hk_rancher_login_reason: hk unimport
+
+    - name: Look for the lab cluster record
+      ansible.builtin.uri:
+        url: "https://{{ hk_rancher_hostname }}/v3/clusters?name={{ hk_rancher_cluster_name }}"
+        headers: "{{ hk_rancher_headers }}"
+        ca_path: "{{ hk_rancher_ca }}"
+        validate_certs: true
+        use_proxy: false
+      register: hk_unlink_existing
+      no_log: true
+
+    - name: Delete the lab cluster record
+      ansible.builtin.uri:
+        url: "https://{{ hk_rancher_hostname }}/v3/clusters/{{ item.id }}"
+        method: DELETE
+        headers: "{{ hk_rancher_headers }}"
+        ca_path: "{{ hk_rancher_ca }}"
+        validate_certs: true
+        use_proxy: false
+        status_code: [200, 204, 404]
+      loop: >-
+        {{ hk_unlink_existing.json.data | default([])
+           | selectattr('name', 'equalto', hk_rancher_cluster_name) | list }}
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: true
+
+    - name: Revoke the deregistration login
+      ansible.builtin.include_tasks: logout.yml
+
+  rescue:
+    - name: Report that Rancher could not be reached
+      ansible.builtin.debug:
+        msg: >-
+          Rancher could not be reached, so its record of
+          {{ hk_rancher_cluster_name }} is still there. Remove it by hand under
+          Cluster Management. The agent is removed from this cluster below
+          regardless.
+
+# --- local cleanup, always ------------------------------------------------
+
+- name: Remove Rancher's admission webhooks
+  # These come first and they are the whole reason this task list is ordered.
+  # Both configurations fail closed: while they exist with no rancher-webhook
+  # service behind them, every namespace create AND delete in this cluster
+  # fails — including the namespace deletes below, and every later `hk deploy`.
+  # Leaving them behind does not merely leave litter; it bricks the cluster.
+  ansible.builtin.command: >-
+    kubectl delete {{ item }} rancher.cattle.io --ignore-not-found --wait=true
+  environment: &kube
+    KUBECONFIG: "{{ hk_kubeconfig }}"
+  loop:
+    - validatingwebhookconfiguration
+    - mutatingwebhookconfiguration
+  changed_when: true
+
+- name: Remove the agent's namespaces
+  ansible.builtin.command: >-
+    kubectl delete namespace {{ item }} --ignore-not-found --wait=false
+  environment: *kube
+  loop:
+    - cattle-system
+    - cattle-fleet-system
+    - cattle-fleet-local-system
+    - cattle-impersonation-system
+    - cattle-global-data
+    - cattle-global-nt
+    - fleet-local
+    - fleet-default
+  changed_when: true
+
+- name: Remove the agent's cluster-scoped RBAC
+  ansible.builtin.shell: |
+    set -uo pipefail
+    for kind in clusterrolebinding clusterrole; do
+      kubectl get "$kind" -o name 2>/dev/null \
+        | grep -E '/(cattle-|rancher-|fleet-|proxy-clusterrole|system-upgrade)' \
+        | xargs -r kubectl delete --ignore-not-found
+    done
+    exit 0
+  args:
+    executable: /bin/bash
+  environment: *kube
+  changed_when: true
+
+- name: Remove Rancher's CRDs
+  # Every *.cattle.io group EXCEPT the two that belong to k3s itself:
+  # k3s.cattle.io (addons, etcd snapshots) and helm.cattle.io (the
+  # helm-controller the gVisor and CoreDNS configuration depend on). Deleting
+  # either of those would damage the cluster far more than the agent did.
+  ansible.builtin.shell: |
+    set -uo pipefail
+    kubectl get crd -o name 2>/dev/null \
+      | grep -E '\.cattle\.io$' \
+      | grep -vE '\.(k3s|helm)\.cattle\.io$' \
+      | xargs -r kubectl delete --ignore-not-found --wait=false
+    exit 0
+  args:
+    executable: /bin/bash
+  environment: *kube
+  changed_when: true
+
+- name: Wait for the agent namespace to actually be gone
+  # Deleted with --wait=false above so a broken Rancher cannot hang the
+  # teardown, but unimport should not return while cattle-system is still
+  # terminating: the very next `hk import` would race it.
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    kubectl get namespace cattle-system -o jsonpath='{.status.phase}' 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  environment: *kube
+  register: hk_unlink_ns_phase
+  until: hk_unlink_ns_phase.stdout | trim != 'Terminating'
+  retries: 60
+  delay: 5
+  changed_when: false
+
+- name: Forget the Rancher link
+  ansible.builtin.file:
+    path: "{{ hk_rancher_link_dir }}"
+    state: absent
+
+- name: Prove the cluster can create a namespace again
+  # The point of the whole ordered teardown. If a fail-closed webhook were
+  # still in place this is where it would show, rather than in whichever lab
+  # was deployed next.
+  ansible.builtin.shell: |
+    set -uo pipefail
+    kubectl create namespace hk-unimport-smoke >/dev/null 2>&1
+    rc=$?
+    kubectl delete namespace hk-unimport-smoke --ignore-not-found --wait=false >/dev/null 2>&1
+    exit $rc
+  args:
+    executable: /bin/bash
+  environment: *kube
+  register: hk_unlink_admission
+  until: hk_unlink_admission.rc == 0
+  retries: 12
+  delay: 5
+  changed_when: false

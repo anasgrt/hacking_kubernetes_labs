@@ -1,0 +1,28 @@
+# Managed by Ansible — the permanent management cluster.
+#
+# This machine is never a lab target. The labs run on the other VM, against
+# k3s; nothing here is meant to be attacked, broken or reset.
+node-name: {{ hk_rke2_node_name }}
+node-ip: {{ hk_mgmt_ip }}
+advertise-address: {{ hk_mgmt_ip }}
+
+# The agent in the lab cluster reaches this API and this name, so both the
+# address and the DNS name have to be in the serving certificate.
+tls-san:
+  - {{ hk_mgmt_ip }}
+  - {{ hk_rancher_hostname }}
+  - {{ hk_rke2_node_name }}
+
+write-kubeconfig-mode: "0600"
+cni: canal
+
+# The upstream the dnsupstream role proved answers. Without this, CoreDNS
+# inherits VirtualBox's NAT resolver, which on an IPv6-primary host is dead
+# over IPv4 — and Rancher's chart pulls over it.
+resolv-conf: {{ hk_cluster_resolv_conf }}
+
+cluster-cidr: {{ hk_rke2_cluster_cidr }}
+service-cidr: {{ hk_rke2_service_cidr }}
+cluster-dns: {{ hk_rke2_cluster_dns }}
+
+etcd-snapshot-retention: 5

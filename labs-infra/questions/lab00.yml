@@ -1,0 +1,93 @@
+title: Lab 0 — Prepare a disposable environment
+related: Setup
+objective: >-
+  Establish the prerequisites once and avoid accidental use of a production
+  context.
+question: >-
+  Every later lab creates and destroys real objects. Before any of that, you
+  need a target you are certain is disposable, and a way of addressing it that
+  cannot drift. This lab builds that, and checks which capabilities the later
+  labs will need.
+theory:
+  - >-
+    kubectl resolves its target from the current context: global,
+    mutable state shared by every shell and tool on the machine.
+    Anything can change it between two of your commands, and nothing
+    warns you. Passing --context on each call binds the target to one
+    session instead.
+  - >-
+    The Restricted Pod Security Standard is versioned. A namespace
+    labelled only pod-security.kubernetes.io/enforce=restricted gets
+    whatever that standard means on the cluster's current version;
+    adding enforce-version freezes it, so an upgrade cannot silently
+    change what your manifests are tested against.
+  - >-
+    A capability is not the same as an API object. A cluster can accept
+    a NetworkPolicy and enforce nothing, hold a RuntimeClass whose
+    handler exists nowhere, or run a Falco Pod that sees no syscalls.
+    Labs 4, 9 and 10 turn on exactly those distinctions, which is why
+    they are checked before you start rather than when a result looks
+    wrong.
+
+answer_with:
+  - >-
+    Why does Lab 0 build a k() wrapper pinned to $LAB_CONTEXT instead of just
+    running kubectl config use-context once?
+  - >-
+    What does the wrapper do when LAB_CONTEXT is empty, and why is that better
+    than falling back to the current context?
+  - >-
+    new_lab sets both enforce and enforce-version. What breaks later if the
+    version is left off?
+  - >-
+    Which labs need more than a plain cluster, and why must that be checked
+    before starting rather than when the lab fails?
+solution:
+  - >-
+    use-context mutates global state. Another terminal, an IDE plugin or a
+    script can change the current context between two of your commands, and
+    everything after that silently targets somewhere else — possibly
+    production. The wrapper passes --context explicitly on every single call,
+    so the target is bound to this shell session, not to a global that anyone
+    can edit.
+  - >-
+    It prints "LAB_CONTEXT is empty; repeat Lab 0." and returns 1 without
+    running kubectl at all. Falling back to the current context is exactly the
+    accident the wrapper exists to prevent: an unset variable would silently
+    aim every destructive command in the workbook at whatever cluster happened
+    to be current.
+  - >-
+    Without enforce-version the namespace tracks whatever "restricted" means on
+    the cluster's current version. Upgrade the cluster and the standard can
+    tighten, so a manifest that was admitted before is now rejected — or a lab
+    that should fail now passes. The experiment stops being reproducible, and
+    worse, it fails in a way that looks like your manifest changed.
+  - >-
+    Lab 4 needs a CNI that actually enforces NetworkPolicy rather than merely
+    storing the object. Labs 3 and 7 need RBAC/impersonation and permission for
+    cluster-scoped policy objects. Labs 9 and 10 are conditional on an already
+    installed sandbox runtime and a healthy Falco. Checking first matters
+    because each of these fails in a way that can be mistaken for success — a
+    stored-but-unenforced NetworkPolicy makes Lab 4 "pass" for the wrong
+    reason.
+
+solution_steps:
+  # Which of the lab's own steps produce the evidence for each
+  # answer above, in order. '-' means the answer is reasoning
+  # rather than something a command shows.
+  - '1'
+  - '1'
+  - '3'
+  - '-'
+
+main_lesson: >-
+  Ambient state is the main reason a lab result cannot be reproduced. Bind
+  the cluster explicitly, pin the policy version, and confirm the
+  capability each lab depends on actually works before you rely on its
+  result. After this lab you should be able to say which cluster a command
+  will reach and why, and name what Labs 4, 9 and 10 need beyond a plain
+  cluster.
+
+notes: >-
+  In this VM, LAB_CONTEXT is already pinned to the only context, and
+  `hk check` verifies every capability the eleven labs need.

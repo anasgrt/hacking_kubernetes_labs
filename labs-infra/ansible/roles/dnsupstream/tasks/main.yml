@@ -1,0 +1,61 @@
+---
+# Pick a DNS upstream for the cluster that demonstrably answers.
+#
+# CoreDNS forwards to the resolv.conf kubelet hands its Pods. By default that
+# is the node's host-inherited file, which under VirtualBox NAT lists 10.0.2.3
+# — VirtualBox's DNS proxy. On an IPv6-primary host that proxy answers over
+# IPv6 only, and the dead IPv4 entry is the one an IPv4-only Pod network is
+# left with: every in-cluster lookup of an external name then fails with
+# SERVFAIL. That surfaces a long way from its cause — as Falco's falcoctl init
+# container crash-looping, or as a Rancher agent that never registers.
+#
+# Used by both distributions, which is why it is a role and not a k3s task.
+
+- name: Collect the IPv4 nameservers the node inherited
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    cat /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null
+    | awk '/^nameserver/ && $2 ~ /^[0-9]+(\.[0-9]+){3}$/ && $2 !~ /^127\./ {print $2}'
+    | awk '!seen[$0]++'
+  args:
+    executable: /bin/bash
+  register: hk_inherited_ns
+  changed_when: false
+
+- name: Find a nameserver that actually answers an external query
+  ansible.builtin.shell: |
+    set -uo pipefail
+    for ns in {{ (hk_inherited_ns.stdout_lines + hk_dns_fallbacks) | unique | join(' ') }}; do
+      if [ -n "$(dig +short +time=3 +tries=1 A {{ hk_dns_probe_name }} @"$ns" 2>/dev/null)" ]; then
+        echo "$ns"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: hk_working_ns
+  changed_when: false
+
+- name: Refuse to continue without a usable DNS upstream for the cluster
+  ansible.builtin.assert:
+    that: hk_working_ns.stdout_lines | length > 0
+    fail_msg: >-
+      None of {{ (hk_inherited_ns.stdout_lines + hk_dns_fallbacks) | unique | join(', ') }}
+      answered a query for {{ hk_dns_probe_name }} from inside the VM. Cluster
+      DNS cannot work. Set hk_dns_fallbacks to a resolver this network permits.
+
+- name: Report the chosen upstream
+  ansible.builtin.debug:
+    msg: "cluster DNS upstream: {{ hk_working_ns.stdout_lines | join(', ') }}"
+
+- name: Give the cluster its own resolv.conf
+  ansible.builtin.copy:
+    dest: "{{ hk_cluster_resolv_conf }}"
+    mode: '0644'
+    content: |
+      # Managed by Ansible. Handed to kubelet through the distribution's
+      # config.yaml, so every Pod — CoreDNS included — forwards to an upstream
+      # that was proved to answer at configure time.
+      {% for ns in hk_working_ns.stdout_lines %}
+      nameserver {{ ns }}
+      {% endfor %}
+  register: hk_cluster_resolv

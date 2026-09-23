@@ -1,0 +1,85 @@
+title: Lab 7 — Enforce a scoped native CEL policy
+related: Chapter 8
+objective: >-
+  Show that a policy plus binding rejects a missing label in one namespace
+  while leaving another namespace outside its scope.
+question: >-
+  ValidatingAdmissionPolicy puts a CEL expression in the API server itself, no
+  webhook required. This lab writes one, scopes it to a single namespace, and
+  insists you prove both that it denies and that it does not over-reach.
+theory:
+  - >-
+    A ValidatingAdmissionPolicy holds the rule, written in CEL and
+    evaluated inside the API server. A ValidatingAdmissionPolicyBinding
+    decides where it applies. The definition alone enforces nothing,
+    which is why a policy can exist cluster-wide and still be scoped to
+    one namespace.
+  - >-
+    Because evaluation is in-process, there is no webhook to deploy, no
+    TLS to manage and no network call to fail. That removes a whole
+    class of availability problems that admission webhooks bring with
+    them.
+  - >-
+    The API server loads and type-checks policies asynchronously.
+    Storing both objects successfully only means they are schema-valid,
+    so a negative test run before convergence passes and looks like a
+    correct result.
+
+answer_with:
+  - >-
+    Both objects applied without error. Why is that not evidence of
+    enforcement, and what should you look at instead?
+  - >-
+    Three requests are made. What is the expected outcome of each, and what
+    does the third one specifically prove?
+  - >-
+    If all three pass, what is wrong? If both namespaces deny, what is wrong?
+  - >-
+    How is this rejection different in origin from the one in Lab 2?
+solution:
+  - >-
+    The API server accepts and stores the objects, then loads and type-checks
+    them asynchronously, so there is a window where the policy exists but does
+    not yet evaluate. A negative test run in that window passes and looks like
+    a correct result. Inspect the policy's status and any type-checking
+    warnings, and repeat the test after convergence rather than counting the
+    first pass.
+  - >-
+    A valid Pod in hk-lab07 is admitted. The same Pod with the costcenter label
+    removed is denied, with a message naming costcenter. The same missing-label
+    Pod in hk-lab07-control is admitted. The third proves scope: the policy
+    definition is cluster-scoped, but it only takes effect where the binding
+    selects, so a namespace outside the binding is genuinely unaffected rather
+    than accidentally exempt.
+  - >-
+    All three passing means the policy is not selecting the request at all —
+    look at the binding, its matchConstraints and the CEL expression, and check
+    whether the policy has converged. Both namespaces denying means the scope
+    is too broad, or a different policy is also matching the Pod. Read the
+    message: a Pod Security violation is a different control and tells you
+    nothing about this costcenter rule.
+  - >-
+    Lab 2's rejection comes from Pod Security Admission, a built-in standard
+    selected by namespace labels and maintained upstream. This one comes from a
+    rule you wrote in CEL, evaluated in-process by the API server, and applied
+    exactly where your binding says. Both happen during validating admission,
+    but one is a fixed standard and the other is your policy with your blast
+    radius — which is why proving the out-of-scope case matters.
+
+solution_steps:
+  # Which of the lab's own steps produce the evidence for each
+  # answer above, in order. '-' means the answer is reasoning
+  # rather than something a command shows.
+  - '2'
+  - '3'
+  - '3'
+  - '-'
+
+main_lesson: >-
+  A policy object is a definition and a binding is the decision to enforce
+  it, so proving a rule works means proving both that it denies inside its
+  scope and that it does not deny outside it. After this lab you should be
+  able to test a policy after it has converged rather than immediately,
+  and tell an over-broad binding from an ineffective one by which of the
+  three requests behaved unexpectedly.
+

@@ -1,10 +1,24 @@
 # Single source of truth. Read by the Vagrantfile (Ruby), by the Ansible
 # playbooks, and by bin/hk.
 #
-# There is ONE virtual machine. It is built once and carries every capability
-# any lab needs: Docker, k3s with NetworkPolicy enforcement, a gVisor sandbox
-# runtime, and a Falco sensor. Labs are then deployed into it one at a time and
-# removed when you are finished with them.
+# There are TWO virtual machines, with deliberately different lifetimes:
+#
+#   hk-labs  the lab VM. Built once, carries every capability any lab needs:
+#            Docker, k3s with NetworkPolicy enforcement, a gVisor sandbox
+#            runtime, a Falco sensor. Labs are deployed into it one at a time.
+#            This is the machine the labs attack.
+#
+#   hk-mgmt  the management VM. RKE2 with Rancher on top. It watches the lab
+#            cluster and is never a target. It is optional: every lab works
+#            without it.
+#
+# They are separate machines on purpose. RKE2 and k3s both default to port
+# 6443, to pod CIDR 10.42.0.0/16 and to service CIDR 10.43.0.0/16, and both
+# run a CNI and iptables rules in the host network namespace. Ports and CIDRs
+# can be moved; canal and kube-router sharing one namespace cannot be made
+# safe, and Lab 4 exists precisely because k3s's kube-router enforces
+# NetworkPolicy. Keeping the management plane on its own machine also keeps it
+# outside the blast radius of Labs 3 and 7.
 
 vm:
   name: hk-labs
@@ -15,7 +29,36 @@ vm:
   memory: 6144
   cpus: 4
 
+# The management VM. Destroy it and the labs carry on unchanged.
+mgmt:
+  name: hk-mgmt
+  box: bento/ubuntu-24.04
+  box_version: 202502.21.0
+  ip: 192.168.56.111
+  # Rancher alone wants ~4 GB; RKE2 and its system charts want the rest.
+  memory: 10240
+  cpus: 4
+
 k3s_version: v1.37.0+k3s1
+
+# --- the management plane -------------------------------------------------
+# Version pins, never a moving channel. Rancher 2.15 supports RKE2 1.34-1.36.
+# The RKE2 and Helm installers verify their own published checksums.
+rancher:
+  rke2_version: v1.35.8+rke2r1
+  helm_version: v3.21.4
+  chart_version: 2.15.1
+  # Reached over the host-only network at mgmt.ip. A name is needed rather
+  # than a bare address because Rancher's agents are issued a server URL and
+  # a certificate that has to match it.
+  hostname: rancher.hk.test
+  # Lab-only credential. Reapplied on every `hk mgmt configure` and printed by
+  # `hk rancher`, so a password set in the UI does not survive a reconfigure.
+  admin_password: SuperAdmin@123
+  # Create a Rancher Project per lab on deploy and delete it on remove, so each
+  # lab is its own unit in the UI. Set false to leave the lab namespaces
+  # ungrouped; the cluster itself stays imported either way.
+  lab_projects: true
 
 # namespaces: created on deploy, deleted on remove. Anything a lab creates
 # outside a namespace is listed in cluster_objects so removal can find it.

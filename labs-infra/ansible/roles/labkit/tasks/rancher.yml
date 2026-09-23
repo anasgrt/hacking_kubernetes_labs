@@ -1,0 +1,44 @@
+---
+# Give this lab a Rancher Project, or take it away again.
+#
+# Entirely optional. Rancher lives on a separate machine that may never have
+# been built; when it has not, /etc/hk-rancher/cluster-id is absent and every
+# lab deploys and removes exactly as it did before. The labs never depend on
+# the management plane.
+
+- name: Look for a Rancher link on this VM
+  ansible.builtin.stat:
+    path: /etc/hk-rancher/cluster-id
+  register: hk_lab_rancher_link
+
+- name: Manage this lab's Rancher Project
+  when:
+    - hk_lab_rancher_link.stat.exists
+    - hk_spec.rancher.lab_projects | default(true)
+    - hk_lab.namespaces | default([]) | length > 0
+  block:
+    - name: Read the linked cluster identifier
+      ansible.builtin.slurp:
+        src: /etc/hk-rancher/cluster-id
+      register: hk_lab_cluster_id
+
+    - name: Take the Rancher settings from the fleet definition
+      ansible.builtin.set_fact:
+        hk_rancher_cluster_id: "{{ hk_lab_cluster_id.content | b64decode | trim }}"
+        hk_rancher_hostname: "{{ hk_spec.rancher.hostname }}"
+        hk_rancher_admin_password: "{{ hk_spec.rancher.admin_password }}"
+
+    - name: Create or delete the Project
+      ansible.builtin.include_role:
+        name: rancherlink
+        tasks_from: "{{ 'project_create' if hk_action == 'deploy' else 'project_delete' }}"
+
+  rescue:
+    # A lab must deploy and remove whether or not Rancher is reachable. The
+    # management plane is a view onto the labs, never a dependency of them.
+    - name: Carry on without Rancher
+      ansible.builtin.debug:
+        msg: >-
+          {{ hk_lab_name }} {{ hk_action }}d, but its Rancher Project could not be
+          {{ 'created' if hk_action == 'deploy' else 'deleted' }}. Check the
+          management VM with 'hk mgmt check', then re-run this command.

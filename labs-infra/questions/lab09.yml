@@ -1,0 +1,90 @@
+title: Lab 9 — Verify an installed sandbox runtime
+related: Chapter 3
+objective: >-
+  Distinguish selecting a RuntimeClass from actually installing and using its
+  handler.
+question: >-
+  A RuntimeClass named gvisor exists in the cluster. That fact is worth
+  remarkably little. This lab is about what evidence would actually justify
+  saying a workload ran sandboxed.
+theory:
+  - >-
+    A RuntimeClass is an API object carrying a handler name. Nothing
+    validates that any node has a CRI handler by that name: the API
+    server accepts the Pod, and the failure — if there is one — happens
+    later on the node, not at admission.
+  - >-
+    The handler must be configured in that node's containerd, the node
+    must be eligible under any nodeSelector, tolerations and overhead
+    the class declares, and the handler must actually be a sandbox
+    rather than a renamed runc. Each of those is a separate thing to
+    verify.
+  - >-
+    gVisor intercepts syscalls in a user-space kernel, so a process
+    inside the sandbox sees a kernel identity that is not the node's.
+    That difference, read from inside the container, is the observation
+    that distinguishes a sandbox from a Pod that merely asked for one.
+
+answer_with:
+  - >-
+    The RuntimeClass exists and the Pod was accepted. Why is neither of those
+    evidence that a sandbox is installed?
+  - >-
+    What observation from inside the container actually proves it ran
+    sandboxed?
+  - >-
+    Why does the lab render the selected class into a new file with k patch
+    --local instead of applying the base fixture?
+  - >-
+    If no suitable RuntimeClass exists, what should you record, and what must
+    you avoid doing?
+solution:
+  - >-
+    The object only proves that somebody created an object; the API server does
+    not check that the named handler exists anywhere. Acceptance of the Pod
+    proves only that admission was satisfied — the handler is resolved later,
+    by the kubelet and the container runtime on the assigned node. To claim a
+    sandbox you need the handler configured in that node's containerd, the node
+    actually eligible under any selectors, tolerations and overhead on the
+    class, and evidence the handler is a real sandbox rather than a renamed
+    runc.
+  - >-
+    The kernel identity reported from inside the container. Under gVisor the
+    process sees gVisor's own user-space kernel — in this VM it reports
+    4.19.0-gvisor — which differs from the node's real kernel release. Read it
+    alongside .spec.runtimeClassName and the container's runtime in the
+    containerStatuses, so you are correlating what was requested with what
+    actually served the syscalls.
+  - >-
+    Because the base fixture deliberately has no runtimeClassName. k patch
+    --local writes 09-sandbox-selected.yaml with the class you chose, leaving
+    the fixture reproducible. Applying the base file directly would create a
+    Pod under the node's default runtime, it would start perfectly, and you
+    would have a healthy Pod that proves nothing — the precise false pass this
+    lab is designed to prevent.
+  - >-
+    Record the lab as unavailable. It is explicitly conditional. Do not invent
+    a handler name and do not point it at an ordinary runc RuntimeClass to make
+    the lab complete: that produces a confident-looking result which asserts
+    sandboxing that does not exist, which is worse than an honest gap.
+
+solution_steps:
+  # Which of the lab's own steps produce the evidence for each
+  # answer above, in order. '-' means the answer is reasoning
+  # rather than something a command shows.
+  - '1'
+  - '3'
+  - '3'
+  - '1'
+
+main_lesson: >-
+  The object is not the runtime: a RuntimeClass names a handler, and only
+  evidence from inside a running container shows which runtime actually
+  served its syscalls. After this lab you should be able to state what has
+  to be true for a sandbox claim to hold, gather that evidence yourself,
+  and record a lab as unverified rather than manufacturing a result that
+  looks confident and proves nothing.
+
+notes: >-
+  In this VM the gvisor RuntimeClass and the runsc handler are installed, and
+  the gVisor role proves it at configure time by running a real sandboxed Pod.
