@@ -1,0 +1,124 @@
+---
+# Lab 9 — gVisor. Kata is deliberately not offered: it needs nested
+# virtualisation, which VirtualBox on Apple Silicon does not expose to guests.
+# gVisor's systrap platform needs no nested virt and supports arm64.
+
+- name: Add the gVisor repository
+  ansible.builtin.deb822_repository:
+    name: gvisor
+    types: [deb]
+    uris: https://storage.googleapis.com/gvisor/releases
+    suites: [release]
+    components: [main]
+    architectures: ["{{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else 'amd64' }}"]
+    signed_by: https://gvisor.dev/archive.key
+    state: present
+    enabled: true
+
+- name: Install runsc
+  # One package: it ships /usr/bin/runsc, /usr/bin/containerd-shim-runsc-v1 and
+  # /etc/containerd/runsc.toml. No separate shim package exists for arm64.
+  ansible.builtin.apt:
+    name: runsc
+    state: present
+    update_cache: true
+
+- name: Read the containerd config k3s generated
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/agent/etc/containerd/config.toml
+  register: hk_containerd_cfg
+
+- name: Detect which CRI plugin key this containerd uses
+  # containerd 2.x prefers config version 3 and the io.containerd.cri.v1.runtime
+  # key; containerd 1.7 uses io.containerd.grpc.v1.cri. Detecting beats
+  # hardcoding, so a k3s bump does not silently break Lab 9.
+  ansible.builtin.set_fact:
+    hk_cri_plugin: >-
+      {{ 'io.containerd.cri.v1.runtime'
+         if 'io.containerd.cri.v1.runtime' in (hk_containerd_cfg.content | b64decode)
+         else 'io.containerd.grpc.v1.cri' }}
+
+- name: Show the detected plugin key
+  ansible.builtin.debug:
+    msg: "containerd CRI plugin key: {{ hk_cri_plugin }}"
+
+- name: Extend the k3s containerd template with the runsc runtime
+  # k3s auto-detects crun, nvidia and the wasm shims but NOT runsc, so the
+  # runtime has to be declared. The `base` template is extended rather than
+  # replaced, per k3s guidance, so k3s keeps managing everything else.
+  ansible.builtin.copy:
+    dest: /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+    mode: '0644'
+    content: |
+      {% raw %}{{ template "base" . }}{% endraw %}
+
+      [plugins.'{{ hk_cri_plugin }}'.containerd.runtimes.runsc]
+        runtime_type = "io.containerd.runsc.v1"
+
+      [plugins.'{{ hk_cri_plugin }}'.containerd.runtimes.runsc.options]
+        TypeUrl = "io.containerd.runsc.v1.options"
+        ConfigPath = "/etc/containerd/runsc.toml"
+  notify: restart k3s for gvisor
+
+- name: Apply the containerd change now
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the API server to come back
+  ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=300s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false
+  retries: 10
+  delay: 10
+  register: hk_node_ready
+  until: hk_node_ready.rc == 0
+
+- name: Confirm containerd actually loaded the runsc runtime
+  ansible.builtin.command: grep -c 'runtimes.runsc' /var/lib/rancher/k3s/agent/etc/containerd/config.toml
+  register: hk_runsc_cfg
+  changed_when: false
+  failed_when: hk_runsc_cfg.rc != 0
+
+- name: Create the RuntimeClass the lab selects
+  # Lab 9 lists RuntimeClasses and asks you to pick one. This makes that list
+  # non-empty with a handler that is genuinely installed, which is the whole
+  # point the lab is making: the object is not the runtime.
+  ansible.builtin.copy:
+    dest: /var/lib/rancher/k3s/server/manifests/hk-runtimeclass-gvisor.yaml
+    mode: '0644'
+    content: |
+      apiVersion: node.k8s.io/v1
+      kind: RuntimeClass
+      metadata:
+        name: {{ hk_runtime_class }}
+      handler: {{ hk_runtime_handler }}
+
+- name: Wait for the RuntimeClass to be reconciled
+  ansible.builtin.command: "kubectl get runtimeclass {{ hk_runtime_class }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: hk_rc
+  until: hk_rc.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false
+
+- name: Smoke-test a real sandboxed container before handing the lab over
+  ansible.builtin.shell: |
+    set -euo pipefail
+    kubectl delete pod hk-gvisor-smoke --ignore-not-found --wait=true >/dev/null
+    kubectl run hk-gvisor-smoke --rm -i --restart=Never \
+      --image='{{ hk_lab_image }}' \
+      --overrides='{"spec":{"runtimeClassName":"{{ hk_runtime_class }}"}}' \
+      --command -- python -c 'import platform;print("SANDBOX-KERNEL:",platform.release())'
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: hk_smoke
+  changed_when: false
+  failed_when: "'SANDBOX-KERNEL' not in hk_smoke.stdout"
+
+- name: Report the sandbox kernel string
+  ansible.builtin.debug:
+    msg: "{{ hk_smoke.stdout_lines | select('search', 'SANDBOX-KERNEL') | list }}"

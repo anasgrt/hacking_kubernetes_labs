@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: indirect-reader
+  labels:
+    lab: '03'
+    app: indirect-reader
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: docker.io/library/python:3.13-slim@sha256:8d9d0b8bcf6506481eae4907c18f5e3e7902e629f5f6d684f9e7c32e85e3ddf0
+      command:
+        - python
+        - -c
+        - from pathlib import Path; print(Path("/dummy/password").read_text())
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 128Mi
+      volumeMounts:
+        - name: scratch
+          mountPath: /tmp
+        - name: dummy
+          mountPath: /dummy
+          readOnly: true
+  volumes:
+    - name: scratch
+      emptyDir:
+        sizeLimit: 32Mi
+    - name: dummy
+      secret:
+        secretName: dummy-db

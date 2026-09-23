@@ -1,0 +1,24 @@
+# Supplementary rule for Lab 10 only.
+#
+# Falco's own "Terminal shell in container" rule remains enabled and is the one
+# the lab is teaching. This rule fires on the same event but pins the namespace
+# into the output text, so the lab's `grep -F 'hk-lab10'` is deterministic on
+# any Falco build regardless of how %container.info is rendered.
+- rule: HK Lab terminal shell in container
+  desc: >-
+    A shell was executed inside a container in a study-lab namespace. Benign by
+    construction in this disposable environment; used to validate the whole
+    sensor-to-alert path.
+  condition: >
+    spawned_process
+    and container
+    and shell_procs
+    and proc.tty != 0
+    and k8s.ns.name startswith "hk-"
+  output: >-
+    HK-LAB terminal shell
+    (ns=%k8s.ns.name pod=%k8s.pod.name container=%container.name
+    image=%container.image.repository shell=%proc.name parent=%proc.pname
+    cmdline=%proc.cmdline tty=%proc.tty user=%user.name)
+  priority: NOTICE
+  tags: [hk-lab, container, shell, mitre_execution, T1059]

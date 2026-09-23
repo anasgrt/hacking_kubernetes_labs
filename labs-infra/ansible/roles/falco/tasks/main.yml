@@ -1,0 +1,140 @@
+---
+# Lab 10 — Falco. The lab greps the sensor log for the string 'hk-lab10', so
+# the namespace has to reach the alert output. Two things make that reliable:
+# JSON output (stable field names) and the container-label-derived k8s fields.
+
+- name: Verify the kernel can load the modern eBPF driver
+  # Ubuntu 24.04 ships BTF. Failing here with a clear message beats a
+  # CrashLoopBackOff that looks like a Falco bug.
+  ansible.builtin.stat:
+    path: /sys/kernel/btf/vmlinux
+  register: hk_btf
+
+- name: Refuse to continue without BTF
+  ansible.builtin.assert:
+    that: hk_btf.stat.exists
+    fail_msg: >-
+      /sys/kernel/btf/vmlinux is missing, so Falco's modern_ebpf driver cannot
+      load. Use a kernel built with CONFIG_DEBUG_INFO_BTF, or switch
+      hk_falco_driver to 'ebpf' and supply a matching driver build.
+
+- name: Install Helm
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  args:
+    executable: /bin/bash
+    creates: /usr/local/bin/helm
+
+- name: Create the Falco namespace
+  # Deliberately NOT labelled with the restricted Pod Security Standard: the
+  # sensor is a privileged DaemonSet and restricted admission would reject it.
+  # This is the documented exception pattern, not a lowered cluster baseline.
+  ansible.builtin.command: "kubectl create namespace {{ hk_falco_namespace }}"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: hk_falco_ns
+  changed_when: hk_falco_ns.rc == 0
+  failed_when: hk_falco_ns.rc != 0 and 'AlreadyExists' not in hk_falco_ns.stderr
+
+- name: Label the Falco namespace as a reviewed privileged exception
+  ansible.builtin.command: >-
+    kubectl label namespace {{ hk_falco_namespace }}
+    pod-security.kubernetes.io/enforce=privileged
+    hk-lab.exception=runtime-sensor --overwrite
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false
+
+- name: Add the Falco Helm repository
+  ansible.builtin.command: helm repo add falcosecurity https://falcosecurity.github.io/charts
+  register: hk_helm_repo
+  changed_when: "'has been added' in hk_helm_repo.stdout"
+  failed_when: hk_helm_repo.rc != 0 and 'already exists' not in hk_helm_repo.stderr
+
+- name: Update the Helm repositories
+  ansible.builtin.command: helm repo update falcosecurity
+  changed_when: false
+
+- name: Create the directory the lab rule lives in
+  # copy does not create missing parents, and nothing else makes this path.
+  ansible.builtin.file:
+    path: "{{ hk_store }}/falco"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install the supplementary lab rule
+  # The default "Terminal shell in container" rule already fires. This adds an
+  # explicitly namespaced marker so `grep -F 'hk-lab10'` in the lab has a
+  # deterministic hit regardless of how the default rule's %container.info
+  # renders on this Falco build. Scaffolding for the exercise, not a change to
+  # the detection logic being taught.
+  ansible.builtin.copy:
+    src: hk-lab10-rules.yaml
+    dest: "{{ hk_store }}/falco/hk-lab10-rules.yaml"
+    mode: '0644'
+
+- name: Install or upgrade Falco
+  ansible.builtin.shell: |
+    set -euo pipefail
+    helm upgrade --install falco falcosecurity/falco \
+      --namespace {{ hk_falco_namespace }} \
+      --set driver.kind={{ hk_falco_driver }} \
+      --set tty=true \
+      --set falco.json_output=true \
+      --set falco.json_include_output_property=true \
+      --set falco.buffered_outputs=false \
+      --set falco.file_output.enabled=false \
+      --set collectors.kubernetes.enabled=true \
+      --set-file 'customRules.hk-lab10\.yaml'={{ hk_store }}/falco/hk-lab10-rules.yaml \
+      --wait --timeout 15m
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: hk_falco_install
+  changed_when: "'STATUS: deployed' in hk_falco_install.stdout"
+
+- name: Wait for the sensor DaemonSet to be Ready
+  ansible.builtin.command: >-
+    kubectl rollout status daemonset/falco -n {{ hk_falco_namespace }} --timeout=600s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false
+
+- name: Prove the alert path end to end before handing the lab over
+  # Runs the lab's own trigger shape against a throwaway Pod. If this does not
+  # produce an alert, Lab 10 would waste the learner's time.
+  ansible.builtin.shell: |
+    set -uo pipefail
+    kubectl delete namespace hk-falco-smoke --ignore-not-found --wait=true >/dev/null 2>&1
+    kubectl create namespace hk-falco-smoke >/dev/null
+    kubectl run smoke -n hk-falco-smoke --restart=Never \
+      --image='{{ hk_lab_image }}' --command -- python -c 'import time;time.sleep(300)' >/dev/null
+    kubectl wait -n hk-falco-smoke --for=condition=Ready pod/smoke --timeout=180s >/dev/null
+    sleep 5
+    kubectl exec -n hk-falco-smoke smoke -- sh -c 'id; echo hk-falco-smoke-marker' >/dev/null 2>&1
+    found=0
+    for _ in $(seq 1 24); do
+      if kubectl logs -n {{ hk_falco_namespace }} -l app.kubernetes.io/name=falco \
+           --tail=-1 --since=5m 2>/dev/null | grep -q 'hk-falco-smoke'; then
+        found=1; break
+      fi
+      sleep 5
+    done
+    kubectl delete namespace hk-falco-smoke --wait=false >/dev/null 2>&1
+    [ "$found" -eq 1 ] && echo "FALCO-PATH-OK" || echo "FALCO-PATH-UNCONFIRMED"
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: hk_falco_smoke
+  changed_when: false
+
+- name: Report the alert-path result
+  ansible.builtin.debug:
+    msg: >-
+      Falco alert path: {{ 'confirmed' if 'FALCO-PATH-OK' in hk_falco_smoke.stdout
+      else 'NOT confirmed — inspect the sensor logs before running Lab 10' }}

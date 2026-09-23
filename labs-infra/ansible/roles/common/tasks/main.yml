@@ -1,0 +1,62 @@
+---
+- name: Wait for any boot-time apt lock to clear
+  ansible.builtin.shell: |
+    set -e
+    for _ in $(seq 1 60); do
+      fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || exit 0
+      sleep 5
+    done
+    exit 1
+  changed_when: false
+  args:
+    executable: /bin/bash
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - bash-completion
+      - ca-certificates
+      - curl
+      - gnupg
+      - jq
+      - python3
+      - python3-debian
+      - python3-yaml
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the lab working root
+  ansible.builtin.file:
+    path: "{{ hk_lab_root }}"
+    state: directory
+    owner: "{{ hk_user }}"
+    group: "{{ hk_user }}"
+    mode: '0755'
+
+- name: Install the shell helpers from Lab 0
+  ansible.builtin.template:
+    src: hk-labs.sh.j2
+    dest: /etc/profile.d/hk-labs.sh
+    mode: '0644'
+
+- name: Create the pristine lab store
+  ansible.builtin.file:
+    path: "{{ hk_store }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Install the lab control command
+  ansible.builtin.template:
+    src: hk-lab.j2
+    dest: /usr/local/bin/hk-lab
+    mode: '0755'
+
+- name: Write the orientation note
+  ansible.builtin.template:
+    src: MOTD.j2
+    dest: /etc/motd
+    mode: '0644'

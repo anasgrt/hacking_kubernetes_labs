@@ -1,0 +1,11 @@
+---
+hk_k3s_version: v1.37.0+k3s1
+
+# Traefik and the servicelb go unused by every lab and only consume RAM and
+# add moving parts to `kubectl get all -A`. metrics-server stays: Lab 8's
+# quota discussion is easier to read with `kubectl top` available.
+hk_k3s_server_args:
+  - --disable=traefik
+  - --disable=servicelb
+  - --write-kubeconfig-mode=0644
+  - --node-name=hk-lab-node

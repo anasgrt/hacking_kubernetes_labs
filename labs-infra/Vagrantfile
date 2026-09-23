@@ -1,0 +1,38 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+#
+# Stage 1 of 2: this file only creates the virtual machine.
+#
+# It runs NO provisioner. A machine that comes up from here is a bare Ubuntu
+# box with nothing installed. Stage 2 is a separate Ansible run:
+#
+#   bin/hk build            stage 1 — vagrant up, bare VM
+#   bin/hk configure        stage 2a — Ansible installs every capability
+#   bin/hk deploy lab01     stage 2b — Ansible deploys one lab into it
+#
+# There is one VM for all eleven labs. Labs are deployed and removed inside it
+# rather than getting a machine each.
+
+require 'yaml'
+
+SPEC = YAML.load_file(File.join(__dir__, 'labs.yml')).fetch('vm')
+
+Vagrant.configure('2') do |config|
+  config.vm.define SPEC.fetch('name') do |node|
+    node.vm.box         = SPEC.fetch('box')
+    node.vm.box_version = SPEC.fetch('box_version')
+    node.vm.box_check_update = false
+    node.vm.hostname    = SPEC.fetch('name')
+    node.vm.synced_folder '.', '/vagrant', disabled: true
+
+    node.vm.network 'private_network', ip: SPEC.fetch('ip')
+
+    node.vm.provider 'virtualbox' do |vb|
+      vb.name   = SPEC.fetch('name')
+      vb.memory = SPEC.fetch('memory')
+      vb.cpus   = SPEC.fetch('cpus')
+      vb.customize ['modifyvm', :id, '--groups', '/hacking-kubernetes']
+      vb.customize ['modifyvm', :id, '--natdnshostresolver1', 'on']
+    end
+  end
+end

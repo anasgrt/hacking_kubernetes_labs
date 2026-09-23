@@ -1,0 +1,66 @@
+---
+# Two copies of every lab kit exist on purpose:
+#   /opt/hk-labs/<lab>   pristine, root-owned — the source for a reset
+#   ~/labs/<lab>         your working copy, yours to break
+
+- name: Install the pristine lab kit
+  ansible.builtin.copy:
+    src: "{{ hk_lab_name }}/"
+    dest: "{{ hk_store }}/{{ hk_lab_name }}/"
+    owner: root
+    group: root
+    mode: preserve
+
+- name: Create the working copy
+  ansible.builtin.file:
+    path: "{{ hk_lab_root }}/{{ hk_lab_name }}"
+    state: directory
+    owner: "{{ hk_user }}"
+    group: "{{ hk_user }}"
+    mode: '0755'
+
+- name: Seed the working copy without clobbering your edits
+  ansible.builtin.copy:
+    src: "{{ hk_lab_name }}/"
+    dest: "{{ hk_lab_root }}/{{ hk_lab_name }}/"
+    owner: "{{ hk_user }}"
+    group: "{{ hk_user }}"
+    mode: preserve
+    force: false
+
+- name: Create the lab's namespaces under the Restricted standard
+  # Mirrors the book's new_lab helper: create, then pin the enforced Pod
+  # Security Standard and its version.
+  ansible.builtin.command: "kubectl create namespace {{ item }}"
+  environment: &kube
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  loop: "{{ hk_lab.namespaces | default([]) }}"
+  register: hk_ns
+  changed_when: hk_ns.rc == 0
+  failed_when: hk_ns.rc != 0 and 'AlreadyExists' not in hk_ns.stderr
+
+- name: Enforce the Restricted standard on them
+  ansible.builtin.command: >-
+    kubectl label namespace {{ item }}
+    pod-security.kubernetes.io/enforce=restricted
+    pod-security.kubernetes.io/enforce-version={{ hk_psa_version }}
+    hk-lab={{ hk_lab_name }} --overwrite
+  environment: *kube
+  loop: "{{ hk_lab.namespaces | default([]) }}"
+  changed_when: false
+
+- name: Record that this lab is deployed
+  ansible.builtin.copy:
+    content: |
+      lab={{ hk_lab_name }}
+      title={{ hk_lab_title }}
+      needs={{ hk_lab.needs }}
+      deployed_at={{ ansible_facts['date_time']['iso8601'] | default('unknown') }}
+    dest: "{{ hk_store }}/{{ hk_lab_name }}/.deployed"
+    mode: '0644'
+
+- name: Report where to start
+  ansible.builtin.debug:
+    msg: >-
+      {{ hk_lab_name }} deployed. Files in {{ hk_lab_root }}/{{ hk_lab_name }};
+      read LAB.md, then work through the steps.

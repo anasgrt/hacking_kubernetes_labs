@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Hacking Kubernetes study labs.
+#
+# One VM, built once, carrying every capability the labs need. Labs are
+# deployed into it one at a time and removed when you are finished.
+#
+#   hk build            Vagrant creates the VM, then Ansible configures it.
+#   hk deploy lab01     Ansible deploys one lab into it.
+#
+# Vagrant and Ansible remain separate tools run in sequence; the Vagrantfile
+# declares no provisioner. `hk build` just runs both for you.
+#
+# Lab names are flexible: lab04, lab4, 04 and 4 all mean the same lab.
+set -euo pipefail
+
+# Resolve the symlink chain before working out the repo root, so `hk` still
+# finds labs.yml and the playbooks when it is linked onto PATH. macOS has no
+# `readlink -f`, hence the loop.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+cd "$ROOT"
+
+# ansible.cfg sits under ansible/, but we run from the repo root, and Ansible
+# only looks in the current directory. Point at it explicitly or its settings
+# are silently ignored.
+export ANSIBLE_CONFIG="$ROOT/ansible/ansible.cfg"
+
+VM="$(awk '/^vm:/{v=1;next} v&&/^  name:/{print $2;exit}' labs.yml)"
+
+usage() {
+  cat <<'USAGE'
+usage: hk <command> [lab]
+
+THE VM — built once
+  hk build             create the VM and configure it   (Vagrant, then Ansible)
+  hk configure         re-run the Ansible half only
+  hk check             re-check the VM's capabilities
+  hk ssh               shell into it
+  hk stop              shut it down, keep its disk
+  hk destroy           delete the virtual machine
+
+LABS — deployed into the VM, one at a time
+  hk list              every lab and whether it is deployed
+  hk deploy <lab>      add a lab to the VM
+  hk status <lab>      what that lab has created so far
+  hk reset <lab>       clear what it created, keep it deployed
+  hk remove <lab>      take it out of the VM entirely
+
+  hk snapshot          save a restore point of the configured VM
+  hk restore           roll the VM back to that restore point
+
+  Getting started
+    hk build           create and configure the VM  (once, ~15 min)
+    hk deploy lab01    add Lab 1
+    hk ssh             work through it
+    hk remove lab01    finished; take it out
+    hk deploy lab02    next
+USAGE
+}
+
+# Accepts lab04, lab4, 04 or 4 and returns the canonical lab name.
+lab() {
+  local raw="${1:-}"
+  if [ -z "$raw" ]; then
+    echo "which lab? e.g. 'hk deploy lab01'. Run 'hk list' to see them all." >&2
+    exit 2
+  fi
+  local n="${raw#[Ll]ab}"
+  if ! [[ "$n" =~ ^[0-9]+$ ]]; then
+    echo "'$raw' is not a lab. Use a name like lab04, or a number 0-10." >&2
+    exit 2
+  fi
+  n=$((10#$n))
+  if [ "$n" -lt 0 ] || [ "$n" -gt 10 ]; then
+    echo "there is no lab $n; the labs are 0 to 10. Run 'hk list'." >&2
+    exit 2
+  fi
+  printf 'lab%02d' "$n"
+}
+
+running() { vagrant status "$VM" 2>/dev/null | grep -qE '\brunning\b'; }
+
+need_vm() {
+  running && return 0
+  echo "the VM is not running. Create it with:  hk build" >&2
+  exit 1
+}
+
+ansible_run() {
+  local playbook="$1"; shift
+  need_vm
+  local inv; inv="$(bin/make-inventory)"
+  echo "==> ansible-playbook $playbook  (inventory: ${inv#"$ROOT"/})"
+  ansible-playbook "ansible/$playbook" -i "$inv" "$@"
+}
+
+in_vm() { need_vm; vagrant ssh "$VM" -c "$*"; }
+
+cmd="${1:-}"; shift || true
+
+case "$cmd" in
+  # --- the VM ----------------------------------------------------------
+  build)
+    echo "==> step 1/2: creating the VM with Vagrant"
+    vagrant up "$VM"
+    echo "==> step 2/2: configuring it with Ansible"
+    ansible_run site.yml "$@"
+    echo "==> VM ready. Save a restore point:  hk snapshot"
+    echo "==> Then add a lab:                  hk deploy lab01" ;;
+  configure) ansible_run site.yml "$@" ;;
+  check)   in_vm 'sudo hk-lab check' ;;
+  ssh)     need_vm; vagrant ssh "$VM" ;;
+  stop)    vagrant halt "$VM" ;;
+  destroy) vagrant destroy -f "$VM" ;;
+
+  # --- labs ------------------------------------------------------------
+  list)    in_vm 'hk-lab list' ;;
+  deploy)  name=$(lab "${1:-}"); shift || true
+           ansible_run lab.yml -e "hk_lab_ref=$name" -e hk_action=deploy "$@" ;;
+  remove)  name=$(lab "${1:-}"); shift || true
+           ansible_run lab.yml -e "hk_lab_ref=$name" -e hk_action=remove "$@" ;;
+  status)  name=$(lab "${1:-}"); in_vm "sudo hk-lab status $name" ;;
+  reset)   name=$(lab "${1:-}"); in_vm "sudo hk-lab reset $name" ;;
+
+  # --- restore points ---------------------------------------------------
+  snapshot)
+    need_vm
+    vagrant snapshot delete "$VM" clean >/dev/null 2>&1 || true
+    vagrant snapshot save "$VM" clean --no-tty
+    echo "==> restore point saved. Roll back with: hk restore" ;;
+  restore)
+    if ! vagrant snapshot list "$VM" 2>/dev/null | grep -q '^clean$'; then
+      echo "no restore point yet. Create one with: hk snapshot" >&2
+      exit 1
+    fi
+    vagrant snapshot restore "$VM" clean --no-provision ;;
+
+  ''|-h|--help|help) usage ;;
+  *) echo "unknown command: $cmd" >&2; echo >&2; usage; exit 2 ;;
+esac

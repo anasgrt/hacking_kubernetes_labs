@@ -1,0 +1,69 @@
+# Single source of truth. Read by the Vagrantfile (Ruby), by the Ansible
+# playbooks, and by bin/hk.
+#
+# There is ONE virtual machine. It is built once and carries every capability
+# any lab needs: Docker, k3s with NetworkPolicy enforcement, a gVisor sandbox
+# runtime, and a Falco sensor. Labs are then deployed into it one at a time and
+# removed when you are finished with them.
+
+vm:
+  name: hk-labs
+  box: bento/ubuntu-24.04
+  box_version: 202502.21.0
+  ip: 192.168.56.110
+  # k3s + Falco + gVisor + Docker together, with headroom for lab Pods.
+  memory: 6144
+  cpus: 4
+
+k3s_version: v1.37.0+k3s1
+
+# namespaces: created on deploy, deleted on remove. Anything a lab creates
+# outside a namespace is listed in cluster_objects so removal can find it.
+labs:
+  - id: 0
+    title: Prepare a disposable environment
+    needs: cluster
+    namespaces: []
+  - id: 1
+    title: Prove the Pod filesystem boundary
+    needs: cluster
+    namespaces: [hk-lab01]
+  - id: 2
+    title: Reject an unsafe Pod before it runs
+    needs: cluster
+    namespaces: [hk-lab02]
+  - id: 3
+    title: Indirect Secret access through Pod creation
+    needs: cluster
+    namespaces: [hk-lab03]
+  - id: 4
+    title: NetworkPolicy with one allowed and one denied client
+    needs: netpol
+    namespaces: [hk-lab04]
+  - id: 5
+    title: Secret files versus environment variables
+    needs: cluster
+    namespaces: [hk-lab05]
+  - id: 6
+    title: Image tags are not immutable identities
+    needs: docker
+    namespaces: []
+  - id: 7
+    title: Scoped native CEL policy
+    needs: cluster
+    namespaces: [hk-lab07, hk-lab07-control]
+    cluster_objects:
+      - validatingadmissionpolicybinding/hk-lab07-costcenter
+      - validatingadmissionpolicy/hk-lab07-costcenter
+  - id: 8
+    title: Quota rejection versus scheduling failure
+    needs: cluster
+    namespaces: [hk-lab08]
+  - id: 9
+    title: Verify an installed sandbox runtime
+    needs: gvisor
+    namespaces: [hk-lab09]
+  - id: 10
+    title: Follow a harmless shell event into Falco
+    needs: falco
+    namespaces: [hk-lab10]

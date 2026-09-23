@@ -1,0 +1,8 @@
+---
+- name: Deploy the lab
+  ansible.builtin.include_tasks: deploy.yml
+  when: hk_action == 'deploy'
+
+- name: Remove the lab
+  ansible.builtin.include_tasks: remove.yml
+  when: hk_action == 'remove'

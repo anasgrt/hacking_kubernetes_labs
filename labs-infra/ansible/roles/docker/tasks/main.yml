@@ -1,0 +1,54 @@
+---
+# Lab 6 needs a Docker engine and no cluster. Lab 0 step 2 does a `docker pull`
+# and `docker run` on every profile, so the engine is installed everywhere.
+
+- name: Add the Docker repository
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: https://download.docker.com/linux/ubuntu
+    suites: "{{ ansible_facts['distribution_release'] }}"
+    components: [stable]
+    architectures: ["{{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else 'amd64' }}"]
+    signed_by: https://download.docker.com/linux/ubuntu/gpg
+    state: present
+    enabled: true
+
+- name: Install the Docker engine and CLI
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+    state: present
+    update_cache: true
+
+- name: Start Docker
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Let the lab user drive Docker without sudo
+  ansible.builtin.user:
+    name: "{{ hk_user }}"
+    groups: docker
+    append: true
+
+- name: Check whether the pinned study image is already present
+  ansible.builtin.command: "docker image inspect {{ hk_lab_image }}"
+  register: hk_img
+  changed_when: false
+  failed_when: false
+
+- name: Pre-pull the pinned study image
+  # Removes the slowest, flakiest step of every lab and makes Lab 0 step 2
+  # instant. Uses the CLI so the role needs no extra Ansible collection.
+  ansible.builtin.command: "docker pull {{ hk_lab_image }}"
+  when: hk_img.rc != 0
+  register: hk_pull
+  retries: 3
+  delay: 10
+  until: hk_pull is succeeded
+  changed_when: true

@@ -1,0 +1,50 @@
+---
+# Stage 2b — deploy or remove one lab inside the already-configured VM.
+#
+#   bin/hk deploy lab04     -> hk_action=deploy
+#   bin/hk remove lab04     -> hk_action=remove
+#
+# Deploying creates the lab's namespaces with the Restricted Pod Security
+# Standard and puts its manifests and step scripts in place. It does not run
+# the lab's own commands: working through those is the exercise.
+
+- name: Deploy or remove a lab
+  hosts: labvm
+  become: true
+  gather_facts: false
+
+  vars:
+    hk_action: deploy
+
+  pre_tasks:
+    - name: Load the fleet definition
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../labs.yml"
+        name: hk_spec
+
+    - name: Require a lab to act on
+      ansible.builtin.assert:
+        that:
+          - hk_lab_ref is defined
+          - hk_action in ['deploy', 'remove']
+        fail_msg: "Run this through bin/hk, which supplies hk_lab_ref and hk_action."
+
+    - name: Resolve the lab
+      ansible.builtin.set_fact:
+        hk_lab: >-
+          {{ hk_spec.labs
+             | selectattr('id', 'equalto', hk_lab_ref | regex_replace('^lab0?', '') | int)
+             | first }}
+
+    - name: Derive the lab facts
+      ansible.builtin.set_fact:
+        hk_lab_id: "{{ hk_lab.id }}"
+        hk_lab_name: "lab{{ '%02d' | format(hk_lab.id | int) }}"
+        hk_lab_title: "{{ hk_lab.title }}"
+
+    - name: Announce the action
+      ansible.builtin.debug:
+        msg: "{{ hk_action }} {{ hk_lab_name }} — {{ hk_lab_title }}"
+
+  roles:
+    - role: labkit

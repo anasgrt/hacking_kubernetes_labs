@@ -1,0 +1,39 @@
+---
+# Removal is ordered: cluster-scoped objects first, because a binding left
+# behind can keep rejecting Pods in namespaces that no longer relate to it.
+
+- name: Delete the lab's cluster-scoped objects
+  ansible.builtin.command: "kubectl delete {{ item }} --ignore-not-found --wait=true"
+  environment: &kube
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  loop: "{{ hk_lab.cluster_objects | default([]) }}"
+  changed_when: true
+
+- name: Delete the lab's namespaces
+  ansible.builtin.command: "kubectl delete namespace {{ item }} --ignore-not-found --wait=true"
+  environment: *kube
+  loop: "{{ hk_lab.namespaces | default([]) }}"
+  changed_when: true
+
+- name: Remove Lab 6's local image tags
+  # Lab 6 never touches the cluster; its only residue is two Docker tags. The
+  # shared base image and build cache are deliberately kept.
+  ansible.builtin.command: docker image rm -f hk-study-local:current hk-study-local:v1
+  when: hk_lab_id | int == 6
+  register: hk_rmi
+  changed_when: "'Untagged' in hk_rmi.stdout"
+  failed_when: false
+
+- name: Remove the working copy
+  ansible.builtin.file:
+    path: "{{ hk_lab_root }}/{{ hk_lab_name }}"
+    state: absent
+
+- name: Mark the lab as not deployed
+  ansible.builtin.file:
+    path: "{{ hk_store }}/{{ hk_lab_name }}/.deployed"
+    state: absent
+
+- name: Confirm
+  ansible.builtin.debug:
+    msg: "{{ hk_lab_name }} removed. The VM and its capabilities are untouched."

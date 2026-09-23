@@ -1,0 +1,44 @@
+# Managed by Ansible — Hacking Kubernetes study labs.
+#
+# Lab 0 builds `k` and `new_lab` interactively because a real workstation has
+# many kubeconfig contexts. This VM has exactly one, so LAB_CONTEXT is fixed
+# here and the selection menu is skipped. The function bodies are otherwise
+# the ones printed in Lab 0.
+
+export HK_STORE={{ hk_store }}
+export HK_LAB_ROOT={{ hk_lab_root }}
+export KUBECONFIG=/home/{{ hk_user }}/.kube/config
+export LAB_CONTEXT=default
+
+k() {
+  if [ -z "${LAB_CONTEXT:-}" ]; then
+    printf '%s\n' 'LAB_CONTEXT is empty; repeat Lab 0.' >&2
+    return 1
+  fi
+  kubectl --context="$LAB_CONTEXT" "$@"
+}
+
+new_lab() {
+  local namespace="$1"
+  k create namespace "$namespace" || return 1
+  k label namespace "$namespace" \
+    pod-security.kubernetes.io/enforce=restricted \
+    pod-security.kubernetes.io/enforce-version={{ hk_psa_version }} || return 1
+}
+
+# `lab 4` jumps to Lab 4's working directory.
+lab() {
+  local n="${1:-}"
+  [ -n "$n" ] || { hk-lab list; return 0; }
+  local name
+  name="$(printf 'lab%02d' "$((10#${n#[Ll]ab}))")" || return 1
+  if [ -d "$HK_LAB_ROOT/$name" ]; then
+    cd "$HK_LAB_ROOT/$name" && ls
+  else
+    printf '%s is not deployed. From the host: hk deploy %s\n' "$name" "$name" >&2
+    return 1
+  fi
+}
+
+command -v kubectl >/dev/null && source <(kubectl completion bash) 2>/dev/null
+complete -o default -F __start_kubectl k 2>/dev/null

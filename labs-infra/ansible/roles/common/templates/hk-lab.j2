@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# Managed by Ansible — lab control inside the VM.
+#
+#   hk-lab list            every lab and whether it is deployed here
+#   hk-lab check           the VM's capabilities
+#   hk-lab status [lab]    what exists right now
+#   hk-lab reset <lab>     clear what a lab created, restore its files
+set -uo pipefail
+
+STORE={{ hk_store }}
+LAB_ROOT={{ hk_lab_root }}
+LAB_USER={{ hk_user }}
+LAB_IMAGE="{{ hk_lab_image }}"
+STUDY_NS="{{ hk_study_namespaces | join(' ') }}"
+FALCO_NS={{ hk_falco_namespace }}
+RUNTIME_CLASS={{ hk_runtime_class }}
+export KUBECONFIG=/home/{{ hk_user }}/.kube/config
+
+say()  { printf '\033[1m%s\033[0m\n' "$*"; }
+ok()   { printf '  \033[32mok\033[0m    %s\n' "$*"; }
+bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; FAILED=1; }
+note() { printf '  --    %s\n' "$*"; }
+
+# Read one field for a lab out of the catalogue Ansible published.
+lab_field() {
+  python3 - "$STORE/labs.json" "$1" "$2" <<'PY'
+import json, sys
+labs = json.load(open(sys.argv[1]))
+want, field = int(sys.argv[2]), sys.argv[3]
+for l in labs:
+    if l["id"] == want:
+        v = l.get(field, "")
+        print(" ".join(v) if isinstance(v, list) else v)
+        break
+PY
+}
+
+norm() {
+  local raw="${1:-}" n
+  n="${raw#[Ll]ab}"
+  [[ "$n" =~ ^[0-9]+$ ]] || { echo "not a lab: '$raw'" >&2; return 1; }
+  printf '%d' "$((10#$n))"
+}
+
+cmd_list() {
+  printf '%-7s %-9s %-12s %s\n' LAB NEEDS DEPLOYED TITLE
+  python3 - "$STORE" <<'PY'
+import json, os, sys
+store = sys.argv[1]
+for l in json.load(open(os.path.join(store, "labs.json"))):
+    name = "lab%02d" % l["id"]
+    dep = "yes" if os.path.exists(os.path.join(store, name, ".deployed")) else "-"
+    print("%-7s %-9s %-12s %s" % (name, l.get("needs", ""), dep, l["title"]))
+PY
+}
+
+cmd_check() {
+  FAILED=0
+  say "VM capabilities"
+  docker image inspect "$LAB_IMAGE" >/dev/null 2>&1 \
+    && ok "pinned study image present in Docker" \
+    || bad "pinned study image missing from Docker"
+  kubectl get --raw=/readyz >/dev/null 2>&1 && ok "API server ready" || bad "API server not ready"
+  kubectl get nodes -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null \
+    | grep -q True && ok "node Ready" || bad "no Ready node"
+  kubectl api-resources --api-group=admissionregistration.k8s.io 2>/dev/null \
+    | grep -q validatingadmissionpolicies \
+    && ok "ValidatingAdmissionPolicy API available (Lab 7)" \
+    || bad "ValidatingAdmissionPolicy API missing (Lab 7)"
+  for ns in $STUDY_NS; do
+    kubectl get namespace "$ns" >/dev/null 2>&1 && ok "chapter namespace $ns" \
+      || bad "chapter namespace $ns missing"
+  done
+  k3s ctr images ls -q 2>/dev/null | grep -qF "${LAB_IMAGE#docker.io/}" \
+    && ok "study image preloaded into containerd" \
+    || note "study image not preloaded; first Pod will pull"
+  iptables-save 2>/dev/null | grep -q KUBE-ROUTER \
+    && ok "kube-router NetworkPolicy chains present (Lab 4)" \
+    || note "no kube-router chains yet; they appear once a policy exists"
+  command -v runsc >/dev/null 2>&1 && ok "runsc: $(runsc --version | head -1)" || bad "runsc missing (Lab 9)"
+  [ -x /usr/bin/containerd-shim-runsc-v1 ] && ok "runsc containerd shim present" || bad "runsc shim missing"
+  grep -q 'runtimes.runsc' /var/lib/rancher/k3s/agent/etc/containerd/config.toml 2>/dev/null \
+    && ok "containerd knows the runsc runtime" || bad "containerd has no runsc runtime"
+  kubectl get runtimeclass "$RUNTIME_CLASS" >/dev/null 2>&1 \
+    && ok "RuntimeClass $RUNTIME_CLASS exists (Lab 9)" || bad "RuntimeClass $RUNTIME_CLASS missing"
+  [ -r /sys/kernel/btf/vmlinux ] && ok "kernel BTF present (Falco modern eBPF)" \
+    || bad "no /sys/kernel/btf/vmlinux; Falco modern eBPF cannot load"
+  local ready
+  ready=$(kubectl get pods -n "$FALCO_NS" -l app.kubernetes.io/name=falco \
+    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null \
+    | grep -c True)
+  [ "${ready:-0}" -ge 1 ] && ok "Falco sensor Ready (Lab 10)" || bad "no Ready Falco sensor (Lab 10)"
+  [ "${FAILED:-0}" -eq 0 ] && say "VM is ready for every lab." || say "Some capabilities are unmet."
+  return "${FAILED:-0}"
+}
+
+cmd_status() {
+  if [ $# -eq 0 ]; then
+    say "Cluster"; kubectl get nodes -o wide
+    echo; cmd_list; return 0
+  fi
+  local id name ns
+  id=$(norm "$1") || return 1
+  name="$(printf 'lab%02d' "$id")"
+  say "$name — $(lab_field "$id" title)"
+  ns="$(lab_field "$id" namespaces)"
+  if [ -z "$ns" ]; then
+    note "this lab creates no namespaces"
+    [ "$id" -eq 6 ] && docker image ls 'hk-study-local' 2>/dev/null | sed 's/^/  /'
+    return 0
+  fi
+  for n in $ns; do
+    if kubectl get namespace "$n" >/dev/null 2>&1; then
+      echo "namespace/$n:"
+      kubectl get pods,netpol,resourcequota,secrets -n "$n" 2>/dev/null | sed 's/^/  /'
+    else
+      note "namespace $n does not exist"
+    fi
+  done
+  local co; co="$(lab_field "$id" cluster_objects)"
+  [ -n "$co" ] && { echo "cluster-scoped:"; for o in $co; do
+      kubectl get "$o" --ignore-not-found 2>/dev/null | sed 's/^/  /'; done; }
+}
+
+cmd_reset() {
+  local id name ns co
+  id=$(norm "${1:?usage: hk-lab reset <lab>}") || return 1
+  name="$(printf 'lab%02d' "$id")"
+  say "Resetting $name"
+  co="$(lab_field "$id" cluster_objects)"
+  for o in $co; do kubectl delete "$o" --ignore-not-found --wait=true; done
+  ns="$(lab_field "$id" namespaces)"
+  for n in $ns; do kubectl delete namespace "$n" --ignore-not-found --wait=true; done
+  for n in $ns; do
+    kubectl create namespace "$n"
+    kubectl label namespace "$n" \
+      pod-security.kubernetes.io/enforce=restricted \
+      pod-security.kubernetes.io/enforce-version={{ hk_psa_version }} \
+      hk-lab="$name" --overwrite
+  done
+  [ "$id" -eq 6 ] && docker image rm -f hk-study-local:current hk-study-local:v1 >/dev/null 2>&1
+  rm -rf "${LAB_ROOT:?}/$name"
+  install -d -o "$LAB_USER" -g "$LAB_USER" "$LAB_ROOT/$name"
+  cp -a "$STORE/$name/." "$LAB_ROOT/$name/"
+  rm -f "$LAB_ROOT/$name/.deployed"
+  chown -R "$LAB_USER":"$LAB_USER" "$LAB_ROOT/$name"
+  say "$name reset. Namespaces recreated empty; files restored."
+}
+
+case "${1:-list}" in
+  list)   cmd_list ;;
+  check)  cmd_check ;;
+  status) shift; cmd_status "$@" ;;
+  reset)  shift; cmd_reset "$@" ;;
+  *) echo "usage: hk-lab {list|check|status [lab]|reset <lab>}" >&2; exit 2 ;;
+esac

@@ -1,0 +1,59 @@
+---
+# Stage 2a — configure the VM.
+#
+# Installs every capability any lab needs, so the machine is built once and
+# then reused: Docker, k3s (NetworkPolicy enforced), the gVisor sandbox
+# runtime, and a Falco sensor. Deploys no lab; see lab.yml for that.
+#
+# Run through `bin/hk configure`. Safe to re-run; every role is idempotent.
+
+- name: Configure the lab VM
+  hosts: labvm
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Load the fleet definition
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../labs.yml"
+        name: hk_spec
+
+    - name: Take the k3s version from the fleet definition
+      ansible.builtin.set_fact:
+        hk_k3s_version: "{{ hk_spec.k3s_version }}"
+
+    - name: Fail fast on an unexpected guest architecture
+      ansible.builtin.assert:
+        that: ansible_facts['architecture'] in ['aarch64', 'x86_64']
+        fail_msg: >-
+          Unsupported guest architecture {{ ansible_facts['architecture'] }}.
+          The pinned lab image publishes linux/amd64 and linux/arm64 only.
+
+  roles:
+    - role: common
+      tags: [common]
+    - role: docker
+      tags: [docker]
+    - role: k3s
+      tags: [k3s]
+    - role: gvisor
+      tags: [gvisor]
+    - role: falco
+      tags: [falco]
+
+  post_tasks:
+    - name: Publish the lab catalogue inside the VM
+      ansible.builtin.copy:
+        content: "{{ hk_spec.labs | to_nice_json }}\n"
+        dest: "{{ hk_store }}/labs.json"
+        mode: '0644'
+
+    - name: Check the VM's capabilities
+      ansible.builtin.command: /usr/local/bin/hk-lab check
+      changed_when: false
+      register: hk_check
+      failed_when: hk_check.rc != 0
+
+    - name: Capability report
+      ansible.builtin.debug:
+        var: hk_check.stdout_lines

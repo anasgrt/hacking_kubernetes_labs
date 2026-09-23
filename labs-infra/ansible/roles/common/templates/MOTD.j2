@@ -1,0 +1,22 @@
+
+  Hacking Kubernetes — study lab VM
+
+  One machine, every capability: Docker, k3s (NetworkPolicy enforced),
+  gVisor sandbox runtime, Falco sensor. Labs are deployed into it one at
+  a time from the host.
+
+  hk-lab list            every lab and whether it is deployed here
+  hk-lab check           re-check the VM's capabilities
+  hk-lab status <lab>    what a lab has created so far
+  hk-lab reset <lab>     clear what a lab created, restore its files
+
+  lab 4                  jump to Lab 4's working directory
+  k, new_lab             the Lab 0 helpers, already defined
+
+  Working copies   ~/labs/labNN/          (edit freely)
+  Pristine kits    /opt/hk-labs/labNN/    (reset source)
+
+  From the host:
+    hk deploy lab04      add a lab to this VM
+    hk remove lab04      take it out again
+

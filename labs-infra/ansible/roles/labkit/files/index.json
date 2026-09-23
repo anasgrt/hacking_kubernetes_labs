@@ -1,0 +1,97 @@
+[
+  {
+    "number": 0,
+    "title": "Prepare a disposable environment",
+    "manifests": [],
+    "steps": 3
+  },
+  {
+    "number": 1,
+    "title": "Prove the Pod filesystem boundary",
+    "manifests": [
+      "01-readonly.yaml",
+      "01-writable.yaml"
+    ],
+    "steps": 5
+  },
+  {
+    "number": 2,
+    "title": "Reject an unsafe Pod before it runs",
+    "manifests": [
+      "02-valid.yaml"
+    ],
+    "steps": 4
+  },
+  {
+    "number": 3,
+    "title": "Demonstrate indirect Secret access through Pod creation",
+    "manifests": [
+      "03-binding.yaml",
+      "03-reader.yaml",
+      "03-role.yaml"
+    ],
+    "steps": 4
+  },
+  {
+    "number": 4,
+    "title": "Verify NetworkPolicy with one allowed and one denied client",
+    "manifests": [
+      "04-api.yaml",
+      "04-client.yaml",
+      "04-other.yaml",
+      "04-policy.yaml"
+    ],
+    "steps": 5
+  },
+  {
+    "number": 5,
+    "title": "Compare Secret files with environment variables",
+    "manifests": [
+      "05-reader.yaml"
+    ],
+    "steps": 5
+  },
+  {
+    "number": 6,
+    "title": "Demonstrate why image tags are not immutable identities",
+    "manifests": [
+      "Dockerfile.lab"
+    ],
+    "steps": 3
+  },
+  {
+    "number": 7,
+    "title": "Enforce a scoped native CEL policy",
+    "manifests": [
+      "07-binding.yaml",
+      "07-pod.yaml",
+      "07-policy.yaml"
+    ],
+    "steps": 4
+  },
+  {
+    "number": 8,
+    "title": "Distinguish quota rejection from scheduling failure",
+    "manifests": [
+      "08-first.yaml",
+      "08-quota.yaml"
+    ],
+    "steps": 5
+  },
+  {
+    "number": 9,
+    "title": "Verify an installed sandbox runtime",
+    "manifests": [
+      "09-sandbox.yaml"
+    ],
+    "steps": 4
+  },
+  {
+    "number": 10,
+    "title": "Follow a harmless shell event into Falco",
+    "manifests": [
+      "10-observed.yaml"
+    ],
+    "steps": 5
+  }
+]
